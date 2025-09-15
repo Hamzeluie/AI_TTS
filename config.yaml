@@ -1,0 +1,35 @@
+API_KEY: "test_api_key"
+vad:
+  host: "localhost"
+  port: 5000
+  sample_rate: 16000
+  version: "v1"
+  endpoint: "vad"
+stt:
+  host: "localhost"
+  port: 5001
+  version: "v1"
+  endpoint: "stt"
+llm:
+  host: "localhost"
+  port: 5002
+  version: "v1"
+  endpoint: "llm"
+db:
+  host: "localhost"
+  port: 5003
+  endpoint: "knowledge_base"
+tts:
+  host: "localhost"
+  port: 5004
+  endpoint: "tts"
+call_development:
+  endpoint: "development"
+
+orchestrator:
+  host: "0.0.0.0"
+  port: 8000
+  endpoint: "orchestrator"
+  chunk_duration: 40
+  sample_rate_ms: 8000
+

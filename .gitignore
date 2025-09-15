@@ -1,0 +1,13 @@
+.vscode
+checkpoints
+__pycache__
+*.wav
+*.mp3
+*.npy
+results/
+inputs/
+.venv
+outputs
+.hf_token
+.env
+actions-runner/

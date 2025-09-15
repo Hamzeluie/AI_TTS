@@ -1,0 +1,162 @@
+name: Build and Push Docker Image (Development)
+
+on:
+  push:
+    branches:
+      - develop
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: self-hosted
+    steps:
+      - name: 🧩 Load .env from absolute path
+        run: |
+          # 👇 Define absolute path to your .env file
+          ENV_FILE="/home/ubuntu/borhan/whole_pipeline/vexu/AI_TTS/.env"
+
+          # Set fallback defaults
+          HOST_DEFAULT="0.0.0.0"
+          PORT_DEFAULT="8000"
+
+          export HOST="$HOST_DEFAULT"
+          export PORT="$PORT_DEFAULT"
+
+          # Check if .env exists at that path
+          if [ -f "$ENV_FILE" ]; then
+            echo "✅ .env found at $ENV_FILE — loading variables..."
+            set -a
+            source "$ENV_FILE"
+            set +a
+          else
+            echo "⚠️ .env not found at $ENV_FILE — using defaults: HOST=$HOST_DEFAULT, PORT=$PORT_DEFAULT"
+          fi
+
+          # Validate
+          if [ -z "$HOST" ] || [ -z "$PORT" ]; then
+            echo "❌ Error: HOST or PORT is not set (even after fallback)"
+            exit 1
+          fi
+
+          echo "📌 Final config: HOST=$HOST, PORT=$PORT"
+
+          # Save to GITHUB_ENV
+          echo "HOST=$HOST" >> $GITHUB_ENV
+          echo "PORT=$PORT" >> $GITHUB_ENV
+
+      - name: 🔍 Checkout repository
+        uses: actions/checkout@v4
+
+
+      - name: 🐳 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        run: |
+          docker build --no-cache -t tts-server:latest .
+      
+      - name: Stop and remove previous container (optional)
+        run: |
+          if [ $(docker ps -a -q -f name=tts-server-container) ]; then
+            docker stop tts-server-container || true
+            docker rm tts-server-container || true
+          fi
+      
+      - name: 🧹 Remove existing container by name (if exists)
+        run: |
+          CONTAINER_NAME="tts-server-container"
+          if [ $(docker ps -a -q -f name=^/${CONTAINER_NAME}$) ]; then
+            echo "⚠️ Container '$CONTAINER_NAME' exists. Stopping and removing..."
+            docker stop $CONTAINER_NAME 2>/dev/null || true
+            docker rm $CONTAINER_NAME 2>/dev/null || true
+            echo "✅ Container '$CONTAINER_NAME' removed."
+          else
+            echo "✅ No existing container named '$CONTAINER_NAME' found."
+          fi
+
+      - name: 💣 Kill host process using port ${{ env.PORT }} (if any)
+        run: |
+          PORT=${{ env.PORT }}
+          PID=$(lsof -i :$PORT -t) || true
+          if [ -n "$PID" ]; then
+            echo "🧨 Port $PORT is held by process PID: $PID"
+            kill -9 $PID 2>/dev/null || echo "⚠️ Failed to kill PID $PID"
+            sleep 2
+          else
+            echo "✅ No host process found on port $PORT"
+          fi
+
+
+      
+      
+      - name: Run Docker container
+        run: |
+          echo "Starting container with HOST=${{ env.HOST }} PORT=${{ env.PORT }}"
+          docker run -d \
+            --gpus all \
+            --name tts-server-container \
+            --restart unless-stopped \
+            -p "${{ env.PORT }}:${{ env.PORT }}" \
+            -e HOST="${{ env.HOST }}" \
+            -e PORT="${{ env.PORT }}" \
+            tts-server:latest
+      
+      
+            
+      - name: 🧹 Cleanup old Docker images
+        run: |
+          echo "🧹 Removing dangling images..."
+          sudo docker container prune -f
+          docker image prune -f
+      
+      
+      - name: Show running containers
+        run: docker ps
+
+      - name: Output container logs (optional, for debugging)
+        run: |
+          sleep 5
+          docker logs tts-server-container
+
+
+
+
+  test:
+    needs: build-and-push
+    runs-on: self-hosted
+    steps:
+      - name: 🔍 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 📦 Install dependencies
+        run: |
+          pip install websockets librosa soundfile numpy
+
+      - name: 🧪 Run tts WebSocket Test
+        run: |
+          echo "Testing tts server"
+          poetry run python test.py
+  
+  
+  
+  
+  pushing_to_mehdi_origin:
+    runs-on: self-hosted
+    steps:
+      - name: 🔄 Push to Mehdi's Repository
+        run: |
+          # Only push if remote "mehdi" exists
+          if git remote | grep -q '^mehdi$'; then
+            echo "✅ Remote 'mehdi' found — pushing..."
+            git push mehdi develop
+          else
+            echo "⚠️ Remote 'mehdi' not found — skipping push."
+          fi

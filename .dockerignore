@@ -1,0 +1,41 @@
+# Git files
+.git
+.gitignore
+
+# Python virtual environment
+.venv
+venv/
+
+.github/
+# Python bytecode and cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.tox/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+.hf_token
+# IDE an    d editor configuration
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Local test reports or coverage data
+htmlcov/
+.coverage
+*.log # If you have local log files you don't want in the image
+
+# Other local development files
+# (add any other files or folders specific to your local setup)
