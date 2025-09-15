@@ -11,3 +11,5 @@ outputs
 .hf_token
 .env
 actions-runner/
+saved_speech_segments/
+local_models/
