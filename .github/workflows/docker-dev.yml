@@ -56,7 +56,7 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build --no-cache -t tts-server:latest .
+          docker build --no-cache --secret id=hf_token,src=.hf_token -t tts-server .
       
       - name: Stop and remove previous container (optional)
         run: |
