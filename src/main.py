@@ -1,370 +1,544 @@
+import asyncio
+import functools  # For functools.partial
+import logging  # For better logging control
 import os
-import time
-import sys
+import queue
+import threading
 from pathlib import Path
-from SmartAITool.core import cprint # Assuming this is your custom print utility
 
-# Adjust Python path to find ai_service modules
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-
-from models.fish_speech.models.text2semantic.inference import main as generate_semantic_tokens
-from models.fish_speech.models.vqgan.inference import main as vqgan_infer_main
-from models.fish_speech.models.vqgan.inference import load_model as load_vqgan_model
-from models.fish_speech.models.text2semantic.inference import load_model as load_text2semantic_model
-from models.fish_speech.models.vqgan.inference import infer_tts as vqgan_infer_tts_from_codes
+import numpy as np
 import torch
-import soundfile as sf
-import numpy as np # Ensure numpy is imported
+import websockets
+from fish_engine import (
+    FishEngine,  # Assuming FishEngine is the TTS engine you want to use
+)
+
+# Configure for headless server environment
+# These might not be strictly necessary for a server that only generates audio,
+# but are good practice if PyAudio or other audio libraries are used for playback/capture.
+os.environ["ALSA_PCM_DEVICE"] = "0"
+os.environ["ALSA_PCM_CARD"] = "0"
+os.environ["SDL_AUDIODRIVER"] = "dummy"
+# os.environ['PULSE_RUNTIME_PATH'] = '/tmp/pulse' # Uncomment if you use PulseAudio and need a specific runtime path
+
+# RealtimeTTS imports
+from RealtimeTTS import TextToAudioStream
+
+# Load YAML configuration first so it can be used in route definitions
+
+# Configure logging for the server
+# Create logs directory if it doesn't exist
+parent_path = "./"
+os.makedirs(os.path.join(parent_path, "outputs"), exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    filename=os.path.join(parent_path, "outputs", "tts_server.log"),
+)
+logger = logging.getLogger(__name__)
 
 
-class VoiceService:
-    def __init__(self, reference_voice_input_path: str, reference_prompt_text: str):
-        self._output_dir = Path("/home/ubuntu/ai_service/outputs/") 
-        self._output_dir.mkdir(parents=True, exist_ok=True)
-        
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.precision = torch.half 
-        
-        self.checkpoint_path = Path("/home/ubuntu/ai_service/checkpoints/")
-        self.vqgan_checkpoint_path = self.checkpoint_path / "firefly-gan-vq-fsq-8x1024-21hz-generator.pth"
-        self.config_name = "firefly_gan_vq"
+# --- Configuration ---
+SERVER_HOST = os.getenv("HOST","0.0.0.0")
+SERVER_PORT = int(os.getenv("PORT",8000))
 
-        self.vqgan_model = None
-        self.text2semantic_model = None
-        self.decode_one_token_func = None
+# Audio configuration
+COQUI_SAMPLE_RATE = 24000  # CoquiEngine outputs at 24kHz
+TARGET_SAMPLE_RATE = 8000
+TARGET_SAMPLE_WIDTH_BYTES = 2  # 16-bit PCM
 
-        self.reference_prompt_text_str = reference_prompt_text
+# Manual buffer configuration for increased fluency
+BUFFER_SEND_THRESHOLD_MS = (
+    150  # Send audio when buffer accumulates this many milliseconds (e.g., 150-200ms)
+)
+# Calculate buffer size in bytes, ensuring it's a multiple of the sample width
+BUFFER_SEND_THRESHOLD_BYTES = int(
+    TARGET_SAMPLE_RATE * TARGET_SAMPLE_WIDTH_BYTES * (BUFFER_SEND_THRESHOLD_MS / 1000.0)
+)
+BUFFER_SEND_THRESHOLD_BYTES = (
+    BUFFER_SEND_THRESHOLD_BYTES // TARGET_SAMPLE_WIDTH_BYTES
+) * TARGET_SAMPLE_WIDTH_BYTES
 
-        cprint("VoiceService Initialization Started...", 'blue')
+# Path to your reference voice WAV file for cloning.
+REFERENCE_VOICE_WAV = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "egyption_voice.wav"
+)  # Use absolute path
+voice_counter = 0
 
-        cprint("Initializing models...", 'cyan')
-        self._initialize_models()
+# Global CoquiEngine instance
+global_coqui_engine = None
 
-        ref_input_path = Path(reference_voice_input_path)
-        cloned_features_dir = self._output_dir / "cloned_reference_voice"
-        cloned_features_dir.mkdir(parents=True, exist_ok=True)
-        cloned_features_basename = ref_input_path.stem + "_features"
-        potential_cloned_features_path = cloned_features_dir / (cloned_features_basename + ".npy")
+# Simple, fast audio resampling without buffering delays
+def resample_audio_chunk(
+    audio_bytes, source_rate=COQUI_SAMPLE_RATE, target_rate=TARGET_SAMPLE_RATE
+):
+    """Simple, fast resampling for real-time audio"""
+    try:
+        if len(audio_bytes) == 0:
+            return b""
 
-        if ref_input_path.suffix.lower() == ".npy":
-            cprint(f"Using existing reference voice features: {ref_input_path}", 'cyan')
-            if not ref_input_path.exists():
-                raise FileNotFoundError(f"Provided reference .npy file not found: {ref_input_path}")
-            self.cloned_voice_features_path = ref_input_path
-        elif ref_input_path.suffix.lower() in [".wav", ".mp3", ".flac", ".ogg"]:
-            cprint(f"Cloning reference voice from audio: {ref_input_path}", 'cyan')
-            self.cloned_voice_features_path = potential_cloned_features_path
-            self._perform_audio_to_features_cloning(
-                input_audio_path=ref_input_path,
-                output_features_npy_path=self.cloned_voice_features_path
-            )
+        # Convert bytes to numpy array (assuming 16-bit PCM)
+        audio_int16 = np.frombuffer(audio_bytes, dtype=np.int16)
+
+        if len(audio_int16) == 0:
+            return b""
+
+        # Simple decimation for 24kHz -> 8kHz (factor of 3)
+        # This is fast and works well for this specific ratio
+        if source_rate % target_rate == 0:
+            decimated = audio_int16[:: source_rate // target_rate]
         else:
-            raise ValueError(f"Unsupported reference voice file type: {ref_input_path}. Provide .npy or an audio file.")
+            # Fallback: convert to float, use simple linear interpolation
+            audio_float = audio_int16.astype(np.float32) / 32768.0
 
-        if not self.cloned_voice_features_path.exists():
-            raise FileNotFoundError(f"Voice features not found or generated at {self.cloned_voice_features_path}")
-        cprint(f"Using voice features from: {self.cloned_voice_features_path}", 'yellow')
+            # Calculate new length
+            new_length = int(len(audio_float) * target_rate / source_rate)
+            if new_length == 0:
+                return b""
 
-        cprint("Warming up models...", 'cyan')
-        self._warm_up_models()
+            # Simple linear interpolation resampling
+            old_indices = np.linspace(0, len(audio_float) - 1, len(audio_float))
+            new_indices = np.linspace(0, len(audio_float) - 1, new_length)
+            decimated_float = np.interp(new_indices, old_indices, audio_float)
+            decimated = (decimated_float * 32767).astype(np.int16)
 
-        cprint("VoiceService initialized, voice processed, and models warmed up.", 'green')
+        return decimated.tobytes()
 
-    def _initialize_models(self):
-        if self.vqgan_model is None:
-            cprint("Loading VQGAN model...", 'magenta')
-            load_start = time.time()
-            self.vqgan_model = load_vqgan_model(
-                config_name=self.config_name,
-                checkpoint_path=str(self.vqgan_checkpoint_path),
-                device=self.device
-            )
-            cprint(f"VQGAN model loaded in {time.time() - load_start:.2f} seconds.")
-        
-        if self.text2semantic_model is None:
-            cprint("Loading Text2Semantic model...", 'magenta')
-            load_start = time.time()
-            self.text2semantic_model, self.decode_one_token_func = load_text2semantic_model(
-                checkpoint_path=str(self.checkpoint_path),
-                device=self.device,
-                precision=self.precision,
-                compile=True
-            )
-            cprint(f"Text2Semantic model loaded in {time.time() - load_start:.2f} seconds.")
-        
-            if self.device == "cuda":
-                torch.cuda.synchronize()
+    except Exception as e:
+        logger.error(f"Error resampling audio: {e}")
+        return b""  # Return empty bytes on error to prevent sending bad data
 
-            with torch.device(self.device):
-                 self.text2semantic_model.setup_caches(
-                    max_batch_size=1,
-                    max_seq_len=self.text2semantic_model.config.max_seq_len,
-                    dtype=next(self.text2semantic_model.parameters()).dtype,
-                )
 
-    def _perform_audio_to_features_cloning(self, input_audio_path: Path, output_features_npy_path: Path):
-        cprint(f"Generating voice features from {input_audio_path} to {output_features_npy_path}", 'magenta')
-        start_time = time.time()
+# --- TTS Generator Wrapper (now takes a queue) ---
+def tts_input_generator(client_word_queue):
+    """
+    This generator yields words received from a specific client via its word_queue.
+    It blocks until a word is available or a None sentinel is received.
+    """
+    while True:
+        word = client_word_queue.get()  # Blocks until a word is available
+        print(f"Received word: {word}")  # Debug print
+        if word is None or word == "INTERRUPT_TTS":  # Sentinel to stop the generator
+            logger.info("TTS input generator received stop signal.")
+            print("TTS input generator received stop signal.")
+            break
+        yield word
 
-        if self.vqgan_model is None:
-            raise RuntimeError("VQGAN model not initialized before cloning.")
 
-        output_audio_for_cloning_path = output_features_npy_path.with_suffix(".wav")
+# --- Warm-up Function ---
+def warm_up_engine(engine_instance):
+    """
+    Performs a dummy synthesis to warm up the TTS engine.
+    """
+    logger.info("Warming up TTS engine...")
+    print("Warming up TTS engine...")
+    # Use a temporary TextToAudioStream for the warm-up
+    # It needs a dummy callback, but we don't care about the output
+    dummy_stream = TextToAudioStream(engine=engine_instance, muted=True)
+    dummy_text = "Hello."  # Short, simple text
+    dummy_stream.feed(dummy_text)
 
-        vqgan_infer_main(
-            input_path=Path(input_audio_path),
-            output_path=Path(output_audio_for_cloning_path),
-            checkpoint_path=str(self.vqgan_checkpoint_path),
-            config_name=self.config_name,
-            device=self.device,
-            model=self.vqgan_model
-        )
-        
-        if not output_features_npy_path.exists():
-            # It's possible vqgan_infer_main saves with torch.save, and text2semantic expects np.load
-            # This check ensures the file is created. We'll handle format conversion if needed later,
-            # or assume vqgan_infer_main from the library should ideally save in np.load-compatible format if that's the ecosystem.
-            # For now, we address the dummy file creation as the primary error source.
-            # If cloning real audio also leads to this error, vqgan_infer_main's output format is the issue.
-            raise FileNotFoundError(f"Cloned voice feature file {output_features_npy_path} was not created.")
-        
-        # Optional: Convert if vqgan_infer_main saved with torch.save and text2semantic needs np.load
-        try:
-            np.load(output_features_npy_path) # Test load
-        except (TypeError, ValueError) as e: # Catch errors if it's not a valid NumPy .npy file
-            cprint(f"Warning: Cloned feature file {output_features_npy_path} might not be in native NumPy format (Error: {e}). Attempting conversion.", "yellow")
+    # Use a simple lambda for on_audio_chunk as we don't care about the output
+    # The important part is that the synthesis process runs.
+    dummy_stream.play(
+        on_audio_chunk=lambda x: None,
+        log_synthesized_text=False,
+        fast_sentence_fragment=True,  # Make warm-up fast
+    )
+    dummy_stream.stop()  # Clean up the dummy stream
+    logger.info("TTS engine warmed up.")
+    print("TTS engine warmed up.")
+
+
+# --- Manual Audio Buffer Sender Task ---
+async def send_buffered_audio_task(
+    websocket,
+    client_address,
+    audio_buffer,
+    buffer_lock,
+    buffer_event,
+    done_generating_audio_event,
+):
+    """
+    This task sends accumulated audio chunks from the buffer over the WebSocket.
+    It waits for a signal that new audio is available or for a flush signal.
+    """
+    logger.info(f"Starting buffered audio sender for client {client_address}")
+
+    # Small timeout for periodic checks, even if no event is set, to ensure timely flushes
+    # when done_generating_audio_event is set but buffer_event isn't (e.g., very small last chunk)
+    PERIODIC_CHECK_INTERVAL = 0.05  # seconds
+
+    try:
+        while True:
+            # Wait for a signal or a timeout for periodic check
             try:
-                tensor_data = torch.load(output_features_npy_path, map_location='cpu')
-                if isinstance(tensor_data, torch.Tensor):
-                    np.save(output_features_npy_path, tensor_data.cpu().numpy()) # Overwrite with NumPy format
-                    cprint(f"Successfully converted {output_features_npy_path} to NumPy format.", "green")
+                await asyncio.wait_for(
+                    buffer_event.wait(), timeout=PERIODIC_CHECK_INTERVAL
+                )
+                buffer_event.clear()  # Clear the event after it's set
+            except asyncio.TimeoutError:
+                pass  # Timeout occurred, proceed to check buffer anyway
+
+            # Loop to send chunks as long as there's enough data or we're flushing
+            while True:
+                chunk_to_send = b""
+                with buffer_lock:
+                    if len(audio_buffer) >= BUFFER_SEND_THRESHOLD_BYTES:
+                        # Extract a chunk of the threshold size
+                        chunk_to_send = bytes(
+                            audio_buffer[:BUFFER_SEND_THRESHOLD_BYTES]
+                        )
+                        del audio_buffer[:BUFFER_SEND_THRESHOLD_BYTES]
+                    elif done_generating_audio_event.is_set() and len(audio_buffer) > 0:
+                        # If TTS is done and there's remaining audio, send it all
+                        chunk_to_send = bytes(audio_buffer)
+                        audio_buffer.clear()
+                    else:
+                        # Not enough data to send a full chunk, and not flushing yet
+                        break
+
+                if chunk_to_send:
+                    try:
+                        await websocket.send(chunk_to_send)
+                        # logger.debug(f"Sent {len(chunk_to_send)} bytes to {client_address}")
+                    except websockets.exceptions.ConnectionClosed:
+                        logger.warning(
+                            f"WebSocket closed for {client_address} while sending buffered audio. Exiting sender task."
+                        )
+                        return  # Exit task if connection is gone
+                    except Exception as e:
+                        logger.error(
+                            f"Error sending buffered audio to {client_address}: {e}"
+                        )
+                        return  # Exit task on send error
                 else:
-                    cprint(f"Error: Loaded data from {output_features_npy_path} is not a tensor, cannot convert.", "red")
-            except Exception as conv_e:
-                cprint(f"Error converting {output_features_npy_path} to NumPy format: {conv_e}", "red")
-                raise # Re-raise if conversion fails, as it's critical for downstream use
+                    # No chunk was prepared in this iteration, break from inner loop
+                    break
 
-        cprint(f"Voice features generated and saved to {output_features_npy_path} in {time.time() - start_time:.2f} seconds.", 'yellow')
+            # If TTS is done and the buffer is empty, we can exit this task
+            if done_generating_audio_event.is_set() and len(audio_buffer) == 0:
+                logger.info(
+                    f"Buffered audio sender for {client_address}: All audio flushed, exiting."
+                )
+                break
 
-
-    def _warm_up_models(self):
-        cprint("Warming up models with a test inference...", 'magenta')
-        warm_up_start = time.time()
-
-        if self.text2semantic_model is None or self.vqgan_model is None or \
-           not self.cloned_voice_features_path or not self.cloned_voice_features_path.exists():
-            raise RuntimeError("Models not initialized or reference voice features not available for warm-up.")
-
-        warm_up_text = "This is a brief warm-up sentence."
-        warmup_output_dir = self._output_dir / "warmup_outputs"
-        warmup_output_dir.mkdir(parents=True, exist_ok=True)
-
-        cprint("Warming up Text2Semantic generation...", 'magenta')
-        
-        # Call generate_semantic_tokens and handle its current return type (tensor)
-        returned_data_tensor = generate_semantic_tokens(
-            text=warm_up_text,
-            prompt_text=[self.reference_prompt_text_str],
-            prompt_tokens=[str(self.cloned_voice_features_path)],
-            checkpoint_path=str(self.checkpoint_path), # Passed but might be unused if model is provided
-            half=(self.precision == torch.half),
-            device=self.device,
-            num_samples=1, 
-            max_new_tokens=20,
-            top_p=0.7, repetition_penalty=1.2, temperature=0.3,
-            compile=False, # Model already compiled
-            seed=42,
-            iterative_prompt=True,
-            chunk_length=30,
-            output_dir=str(warmup_output_dir), # For text2semantic if it were to save
-            model=self.text2semantic_model, # Passing the pre-loaded model
-            decode_one_token=self.decode_one_token_func, # Passing the pre-loaded function
+    except asyncio.CancelledError:
+        logger.info(f"Buffered audio sender for {client_address} cancelled.")
+    except Exception as e:
+        logger.exception(
+            f"Unexpected error in buffered audio sender for {client_address}: {e}"
         )
+    finally:
+        logger.info(f"Buffered audio sender for {client_address} finished.")
 
-        generated_semantic_token_paths = []
-        if isinstance(returned_data_tensor, torch.Tensor):
-            # Manually save the tensor as text2semantic.inference.main might not be saving it.
-            # Assuming the tensor is for the first (and only, in warm-up) sample.
-            semantic_tokens_save_path = warmup_output_dir / "codes_0.npy" # Standard naming
-            np.save(semantic_tokens_save_path, returned_data_tensor.cpu().numpy())
-            cprint(f"Warm-up: Manually saved semantic tokens to {semantic_tokens_save_path}", "magenta")
-            generated_semantic_token_paths.append(semantic_tokens_save_path)
-        elif returned_data_tensor is not None:
-            cprint(f"Warm-up: generate_semantic_tokens returned unexpected data type: {type(returned_data_tensor)}", "red")
-            cprint(f"Model warm-up failed at semantic token generation in {time.time() - warm_up_start:.2f} seconds", 'yellow')
-            return
-        else: # Is None
-             cprint("Warm-up: Semantic token generation returned None. This might be due to text2semantic.inference.main's internal logic (e.g. specific 'idx' condition not met).", "red")
-             cprint(f"Model warm-up failed at semantic token generation in {time.time() - warm_up_start:.2f} seconds", 'yellow')
-             return
+def print_queue_contents(q):
+    """Print the contents of a queue without permanently removing items"""
+    if q.empty():
+        print("Queue is empty")
+        return
+    
+    items = []
+    # Temporarily remove all items
+    while not q.empty():
+        try:
+            item = q.get_nowait()
+            items.append(item)
+        except queue.Empty:
+            break
+    
+    print(f"Queue contents: {items}")
+    
+    # Put all items back
+    for item in items:
+        q.put(item)
 
+# --- WebSocket Handler ---
+async def handle_client(websocket):
+    client_address = websocket.remote_address
+    logger.info(f"Client connected from {client_address}")
 
-        if not generated_semantic_token_paths or not generated_semantic_token_paths[0].exists():
-            cprint("Warm-up: Semantic token file not found after generation attempt.", "red")
-            cprint(f"Model warm-up failed in {time.time() - warm_up_start:.2f} seconds", 'yellow')
-            return
+    # Use a flag to control the TTS execution
+    tts_running = True
+    tts_should_restart = False
+    client_word_queue = queue.Queue()
+    current_loop = asyncio.get_running_loop()
 
-        semantic_tokens_for_vqgan_warmup = generated_semantic_token_paths[0]
-        cprint(f"Warm-up: Using semantic tokens from: {semantic_tokens_for_vqgan_warmup}", 'magenta')
+    # --- Manual Buffer Setup ---
+    audio_buffer = bytearray()
+    buffer_lock = threading.Lock()
+    buffer_event = asyncio.Event()
+    done_generating_audio_event = asyncio.Event()
 
-        cprint("Warming up VQGAN inference from codes...", 'magenta')
-        vqgan_infer_main(
-            input_path=Path(semantic_tokens_for_vqgan_warmup),
-            output_path=Path(warmup_output_dir / "warmup_audio.wav"),
-            checkpoint_path=Path(self.vqgan_checkpoint_path),
-            config_name=self.config_name,
-            device=self.device,
-            model=self.vqgan_model
-        )
-        cprint(f"VQGAN warm-up pass completed. Warm-up audio saved in {warmup_output_dir}.", 'magenta')
-        cprint(f"Model warm-up fully completed in {time.time() - warm_up_start:.2f} seconds.", 'yellow')
+    # --- Audio Chunk Callback ---
+    def on_audio_chunk_callback(audio_chunk_bytes):
+        try:
+            if len(audio_chunk_bytes) == 0:
+                return
+            resampled_audio = resample_audio_chunk(audio_chunk_bytes)
+            if len(resampled_audio) > 0:
+                with buffer_lock:
+                    audio_buffer.extend(resampled_audio)
+                buffer_event.set()
+        except Exception as e:
+            logger.error(f"Error processing audio chunk for client {client_address}: {e}")
 
+    global voice_counter
+    voice_counter += 1
+    
+    # Store play kwargs
+    play_kwargs = {
+        "on_audio_chunk": on_audio_chunk_callback,
+        "log_synthesized_text": True,
+        "buffer_threshold_seconds": 0.2,
+        "output_wavfile": f"generated_audio_{voice_counter}.wav",
+    }
 
-    def generate_speech(self, text_to_speak: str, output_audio_basename: str = "generated_speech", num_samples: int = 1):
-        cprint(f"Starting speech generation for: \"{text_to_speak[:70]}...\"", 'blue')
-        overall_start_time = time.time()
-
-        if self.text2semantic_model is None or self.vqgan_model is None or \
-           not self.cloned_voice_features_path or not self.cloned_voice_features_path.exists() or \
-           not self.reference_prompt_text_str:
-            raise RuntimeError("VoiceService not properly initialized or vital assets missing.")
-
-        inference_codes_dir = self._output_dir / "tts_intermediate_codes" / output_audio_basename
-        inference_codes_dir.mkdir(parents=True, exist_ok=True)
+    # --- TTS Execution Function ---
+    async def run_tts():
+        nonlocal tts_running, tts_should_restart
         
-        t2s_start_time = time.time()
-        cprint(f"Generating semantic tokens using reference prompt: \"{self.reference_prompt_text_str[:70]}...\" and features from: {self.cloned_voice_features_path.name}", 'magenta')
-        
-        # Adapt to current text2semantic.inference.main behavior
-        returned_tensor_data = generate_semantic_tokens(
-            text=text_to_speak,
-            prompt_text=[self.reference_prompt_text_str],
-            prompt_tokens=[str(self.cloned_voice_features_path)],
-            checkpoint_path=str(self.checkpoint_path),
-            half=(self.precision == torch.half),
-            device=self.device,
-            num_samples=num_samples, # Pass requested num_samples
-            max_new_tokens=1024,
-            top_p=0.7, repetition_penalty=1.2, temperature=0.3,
-            compile=False,
-            seed=42,
-            iterative_prompt=True,
-            chunk_length=100,
-            output_dir=str(inference_codes_dir), # For text2semantic if it were to save
-            model=self.text2semantic_model,
-            decode_one_token=self.decode_one_token_func,
-        )
-        cprint(f"Semantic token generation (raw call) took {time.time() - t2s_start_time:.2f}s.", 'yellow')
-
-        generated_semantic_paths = []
-        if isinstance(returned_tensor_data, torch.Tensor):
-            # text2semantic.inference.main currently returns one tensor due to "if idx == 1" logic.
-            # We save this one tensor. This means we'll effectively process one sample.
-            save_path = inference_codes_dir / "codes_0.npy" # Save as the first sample
-            np.save(save_path, returned_tensor_data.cpu().numpy())
-            generated_semantic_paths.append(save_path)
-            cprint(f"Manually saved semantic tokens for one sample to {save_path}", "magenta")
-            if num_samples > 1:
-                cprint(f"Warning: Requested {num_samples} samples, but current 'generate_semantic_tokens' "
-                       f"interface likely provided data for only one sample. Processing this one.", "yellow")
-        elif returned_tensor_data is not None:
-             cprint(f"generate_speech: generate_semantic_tokens returned unexpected data type: {type(returned_tensor_data)}", "red")
-        else: # Is None
-            cprint("generate_speech: Semantic token generation returned None. Cannot proceed with audio synthesis.", "red")
-
-
-        if not generated_semantic_paths: # Check if any paths were successfully prepared
-            cprint("Semantic token processing failed or produced no usable files.", "red")
-            return []
-
-        generated_audio_files = []
-        total_audio_duration = 0
-        vocoding_start_time = time.time()
-
-        # Loop will run for 0 or 1 iteration based on current adaptation
-        for i, semantic_token_path in enumerate(generated_semantic_paths):
-            cprint(f"Vocoding sample {i+1}/{len(generated_semantic_paths)} from {semantic_token_path.name}...", 'magenta')
-            sample_vocoding_start_time = time.time()
-            if isinstance(semantic_token_path, (str, Path)):
-                # Load numpy data from the path
-                npy_tts_voice = np.load(semantic_token_path)
-                npy_tts_voice = torch.from_numpy(npy_tts_voice).to(self.device).long()
+        while tts_running:
+            try:
+                # Create a new stream for each iteration (in case of restart)
+                print('#TTS_RUN' * 20, 'before' * 5)
+                print(f'client_word_queue: {client_word_queue}')
+                stream = TextToAudioStream(
+                    engine=global_coqui_engine,
+                    muted=True,
+                    log_characters=False,
+                )
+                print('RESTART ' * 10)
+                # Feed the stream
+                print('#' * 20, 'after' * 5)
+                print(f'client_word_queue: {tts_input_generator(client_word_queue)}')
+                stream.feed(tts_input_generator(client_word_queue))
+                print('#' * 20, 'after feed' * 5)
+                print(f'client_word_queue: {tts_input_generator(client_word_queue)}')
+                # Run the play method in executor
+                def play_stream():
+                    try:
+                        stream.play(**play_kwargs)
+                    except Exception as e:
+                        if "stop" not in str(e).lower():
+                            logger.error(f"TTS play failed: {e}")
+                
+                await current_loop.run_in_executor(None, play_stream)
+                
+                # If we get here, the play finished normally
+                break
+                
+            except Exception as e:
+                logger.error(f"TTS execution error: {e}")
+                break
+                
+            # Check if we need to restart
+            if tts_should_restart:
+                tts_should_restart = False
+                # Clear queue for restart
+                while not client_word_queue.empty():
+                    try:
+                        client_word_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                continue
             else:
-                # Assume it's already a numpy array
-                npy_tts_voice = semantic_token_path
-            audio_data, audio_duration = vqgan_infer_tts_from_codes(
-                npy_tts_voice=npy_tts_voice,
-                device=self.device,
-                model=self.vqgan_model
+                break
+
+    # Start TTS task
+    tts_task = asyncio.create_task(run_tts())
+
+    # --- Task to receive messages from the client ---
+    async def receive_client_messages():
+        nonlocal tts_should_restart
+        
+        try:
+            
+            async for message in websocket:
+                print(f'TESTI: {print_queue_contents(client_word_queue)}')
+                print("TTS"*20, message)
+                if message == "END_OF_TEXT":
+                    logger.info(f"Received END_OF_TEXT from client {client_address}. Signaling TTS generator to stop.")
+                    client_word_queue.put(None)
+                    break
+                
+                elif message == "INTERRUPT_TTS":
+                    logger.info(f"Received INTERRUPT_TTS from client {client_address}. Restarting stream.")
+                    # stream.char_iter.stop()
+                    # Set flag to restart TTS
+                    tts_should_restart = True
+                    
+                    # Signal the current stream to stop
+                    print('#' * 20, 'before' * 5)
+                    print(f'client_word_queue: {print_queue_contents(client_word_queue)}')
+                    client_word_queue.put(None)
+                    
+                    # Clear the queue
+                    while not client_word_queue.empty():
+                        try:
+                            client_word_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                    print('#' * 20, 'AFTER' * 5)
+                    print(f'client_word_queue: {print_queue_contents(client_word_queue)}')
+                    # Clear audio buffer
+                    with buffer_lock:
+                        audio_buffer.clear()
+                    
+                    logger.info(f"Stream restart initiated for client {client_address}")
+                    continue
+                
+                logger.info(f"Server received token from {client_address}: '{message}'")
+                client_word_queue.put(message)
+                
+        except websockets.exceptions.ConnectionClosedOK:
+            logger.info(f"Client {client_address} disconnected gracefully during message reception.")
+        except websockets.exceptions.ConnectionClosedError as e:
+            logger.warning(f"Client {client_address} disconnected with error during message reception: {e}")
+        except Exception as e:
+            logger.exception(f"Error in receive_client_messages for client {client_address}: {e}")
+        finally:
+            client_word_queue.put(None)
+            logger.info(f"Receive messages task for {client_address} finished.")
+
+    receive_messages_task = asyncio.create_task(receive_client_messages())
+    send_audio_task = asyncio.create_task(
+        send_buffered_audio_task(
+            websocket,
+            client_address,
+            audio_buffer,
+            buffer_lock,
+            buffer_event,
+            done_generating_audio_event,
+        )
+    )
+
+    # --- Wait for tasks to complete and handle cleanup ---
+    try:
+        done, pending = await asyncio.wait(
+            [receive_messages_task, tts_task], 
+            return_when=asyncio.FIRST_COMPLETED
+        )
+
+        # Signal everything to stop
+        tts_running = False
+        client_word_queue.put(None)
+        done_generating_audio_event.set()
+        buffer_event.set()
+
+        # Wait for remaining tasks
+        for task in [receive_messages_task, tts_task, send_audio_task]:
+            if not task.done():
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+        # Check for exceptions
+        for task in [receive_messages_task, tts_task, send_audio_task]:
+            if task.done() and task.exception():
+                logger.error(f"Task {task.get_name()} completed with exception: {task.exception()}")
+
+        await websocket.send("END_OF_AUDIO")
+        logger.info(f"Sent END_OF_AUDIO signal to client {client_address}.")
+
+        try:
+            ack_message = await asyncio.wait_for(websocket.recv(), timeout=10)
+            if ack_message == "ACK_AUDIO_RECEIVED":
+                logger.info(f"Received ACK_AUDIO_RECEIVED from client {client_address}. Handshake complete.")
+        except (asyncio.TimeoutError, websockets.exceptions.ConnectionClosed):
+            logger.info(f"Client {client_address} connection closed during ACK wait.")
+
+    except Exception as e:
+        logger.exception(f"An unexpected error occurred for client {client_address}: {e}")
+    finally:
+        # Cleanup
+        tts_running = False
+        client_word_queue.put(None)
+        done_generating_audio_event.set()
+        buffer_event.set()
+
+        for task in [receive_messages_task, tts_task, send_audio_task]:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        logger.info(f"Client {client_address} disconnected.")
+        
+async def main():
+    global global_coqui_engine
+
+    # Create a dummy reference voice file if it doesn't exist, for initial testing
+    if not os.path.exists(REFERENCE_VOICE_WAV):
+        try:
+            import soundfile as sf
+
+            # Create 1 second of silence at 22050 Hz, 16-bit PCM
+            sf.write(REFERENCE_VOICE_WAV, np.zeros(22050), 22050, subtype="PCM_16")
+            logger.info(f"Created dummy reference voice file: {REFERENCE_VOICE_WAV}")
+        except ImportError:
+            logger.warning(
+                f"'{REFERENCE_VOICE_WAV}' not found and soundfile not installed to create dummy. Coqui will use a default voice."
             )
-            cprint(f"  - Vocoding for sample {i+1} took {time.time() - sample_vocoding_start_time:.2f}s.", 'magenta')
-            
-            # If multiple samples were genuinely produced by generate_semantic_tokens and saved:
-            # suffix = f"_{i}" if num_samples > 1 (or len(generated_semantic_paths) > 1) else ""
-            # For now, with one sample from text2semantic:
-            suffix = "" 
-            final_audio_filename = f"{output_audio_basename}{suffix}.wav"
-            output_audio_path = self._output_dir / final_audio_filename
-            
-            sf.write(str(output_audio_path), audio_data[0, 0].float().detach().cpu().numpy(), 44100)
-            
-            cprint(f"  - Audio sample {i+1} ({audio_duration:.2f}s) saved to: {output_audio_path}", 'yellow')
-            generated_audio_files.append(output_audio_path)
-            total_audio_duration += audio_duration
-        
-        cprint(f"Total vocoding time for {len(generated_semantic_paths)} sample(s): {time.time() - vocoding_start_time:.2f}s.", 'yellow')
-        
-        overall_execution_time = time.time() - overall_start_time
-        cprint(f"Speech generation process completed in {overall_execution_time:.2f} seconds.", 'blue')
-        if total_audio_duration > 0 and overall_execution_time > 0:
-            rtf = overall_execution_time / total_audio_duration
-            cprint(f"Real-Time Factor (RTF): {rtf:.2f} (Speed: {1/rtf:.2f}x Real-Time)", 'green')
-            
-        return generated_audio_files
+        except Exception as e:
+            logger.warning(
+                f"Could not create dummy reference voice file: {e}. Coqui will use a default voice."
+            )
+
+    # Initialize the global CoquiEngine instance once
+    logger.info("Initializing global CoquiEngine...")
+    print("\033[93mInitializing global CoquiEngine...\033[0m")
+    try:
+        # prompt = """مرحباً يا جماعة، كيفكم؟ اليوم حاب أحكي عن شغلة بنمرّ فيها كلنا، يمكن ما بنعطيها اهتمام، بس إلها تأثير كبير علينا,الضغط اليومي. يعني من أول ما نصحى، وإحنا برتم سريع, شغل، جامعة، مشاوير، التزامات، والزلمة ما بلحق حتى يشرب قهوته ع رواق. كل يوم نفس الروتين، وكأننا داخلين سباق، وكل ما نقول خلص، هاليوم بمرّ، بنلاقي حالنا بدوامة تانية! طب وإمتى آخر مرّة فعلياً قعدت مع حالك؟ لا تليفون، لا تليفونات، لا مشاغل,بس لحظة هدوء؟ صرنا ننسى نعيش اللحظة، نضحك من قلبنا، نستمتع بشغلة بسيطة زي كاسة شاي، أو قعدة عالبلكونة وقت المغرب. أنا بقول, لازم نروّق شوي، نخفف السرعة، ونفكر بنفسنا شوي، لأنو صحتك النفسية مش إشي ثانوي، هاد أهم إشي. خدلك لحظة كل يوم، احكي مع حالك، رتب أفكارك، وافهم شو بتحتاج,الدنيا مش مستاهلة كل هالركض، وإذا ما ريّحت حالك، محدا رح يجي يريحك.وبس، هاي كانت دقيقتي معكم اليوم، إذا حبيتوا الموضوع، احكولي, وديروا بالكم على حالكم، والله يعطيكم العافية."""
+        # prompt = """Everything you do is a standing ovation on your first record if you're having that breakthrough record. And then you put out your second body of work and then you realize that everything you're putting out now is being compared to what they liked about your first record. But then you put out the third one and then it's compared to the first two. Then you put out the fourth one. Then it's compared to the first three and it goes on and on and on. By the time you're at album seven, you are so, you have such a strange, convoluted relationship with your previous work because you're like, damn it, All Too Well was a good song. And I knew with this album, it was like something that was almost a return to form. Like Reputation was such an important record for me because I couldn't stop writing. And I needed to write that album and I needed to put out that album and I needed to not explain that album. Because another thing about that album was I knew if I did an interview about it, none of it would be about music. And this entire lover phase"""
+        prompt = """topic but I think honestly I didn't there was no thought process to this album for me really it was all just I mean thought process in the sense of I'm going through something and trying to figure out where I'm at and what I'm feeling and what I'm going to do that but like as far as like oh this is a song that I'm going to put on a record like that wasn't it um it was really just a lot of it like before you got here I was listening to with your people and I was like, man, this is like, I was very angry. Yeah. And foundation being hurt. So yeah, so it's really just, yeah, I didn't really think about it. And I do like the idea of taking a quirky pop happy sound melodically and like the sound of the"""
+        global_coqui_engine = FishEngine(
+            checkpoint_dir=os.path.join(
+                parent_path, "checkpoints", "openaudio-s1-mini"
+            ),
+            output_dir=os.path.join(parent_path, "outputs"),
+            voices_path=None,
+            reference_prompt_tokens=os.path.join(parent_path, "ref_kelly.npy"),
+            device="cuda",
+            precision=torch.bfloat16,  # "half",
+            reference_prompt_text=prompt,
+        )
+        logger.info("Global FishEngine initialized.")
+        print("\033[93mGlobal FishEngine initialized.\033[0m")
+
+        # Warm up the engine
+        warm_up_engine(global_coqui_engine)
+
+    except Exception as e:
+        logger.critical(f"Fatal error initializing global CoquiEngine: {e}")
+        logger.critical("Server cannot start without a working TTS engine.")
+        return
+
+    logger.info(f"Starting WebSocket server on ws://{SERVER_HOST}:{SERVER_PORT}")
+    print(f"Starting WebSocket server on ws://{SERVER_HOST}:{SERVER_PORT}")
+    logger.info(
+        f"Audio processing: {COQUI_SAMPLE_RATE}Hz -> {TARGET_SAMPLE_RATE}Hz with fast decimation"
+    )
+    logger.info(
+        f"Manual buffer: {BUFFER_SEND_THRESHOLD_MS}ms ({BUFFER_SEND_THRESHOLD_BYTES} bytes) threshold"
+    )
+    try:
+        async with websockets.serve(
+            handle_client, SERVER_HOST, SERVER_PORT, ping_interval=20, ping_timeout=60
+        ):
+            await asyncio.Future()  # Run forever
+    except Exception as e:
+        logger.critical(f"WebSocket server failed to start: {e}")
+    finally:
+        # Ensure the global engine is shut down when the server exits
+        if global_coqui_engine:
+            logger.info("Shutting down global CoquiEngine...")
+            global_coqui_engine.shutdown()
+            logger.info("Global CoquiEngine shut down.")
 
 
 if __name__ == "__main__":
-    INPUT_REFERENCE_VOICE = "./clone_voice_feature.npy"
-    placeholder_npy_path = Path(INPUT_REFERENCE_VOICE)
-    
-    # Crucial Fix: Save dummy .npy file using np.save for compatibility with np.load
-    if not placeholder_npy_path.exists():
-        cprint(f"Warning: {placeholder_npy_path} not found. Creating a dummy .npy file for testing.", "red")
-        # Create a NumPy array
-        dummy_np_array = np.random.randint(0, 1024, (1, 200, 8)).astype(np.int16) # Example shape and type
-        np.save(placeholder_npy_path, dummy_np_array) # Use np.save
-        cprint(f"Dummy .npy file saved to {placeholder_npy_path} using np.save().", "green")
-
-    REFERENCE_PROMPT = "This is the reference prompt text, guiding the style of the cloned voice."
-    TEXT_TO_SYNTHESIZE = "Hello world, I am now speaking with the cloned voice characteristics. How do I sound?"
-
-    try:
-        cprint(f"Initializing VoiceService with reference: {INPUT_REFERENCE_VOICE}", 'blue')
-        voice_service = VoiceService(
-            reference_voice_input_path=INPUT_REFERENCE_VOICE,
-            reference_prompt_text=REFERENCE_PROMPT
-        )
-        
-        cprint(f"\nGenerating speech for: \"{TEXT_TO_SYNTHESIZE}\"", 'blue')
-        generated_files = voice_service.generate_speech(
-            text_to_speak=TEXT_TO_SYNTHESIZE,
-            output_audio_basename="my_cloned_speech",
-            num_samples=1 
-        )
-
-        if generated_files:
-            cprint(f"\nSuccessfully generated audio files:", 'green')
-            for f_path in generated_files:
-                cprint(f" - {f_path}", 'green')
-        else:
-            cprint("\nSpeech generation failed or produced no audio files.", 'red')
-
-    except FileNotFoundError as e:
-        cprint(f"ERROR: A required file was not found: {e}", "red")
-        cprint("Please ensure all paths (checkpoints, reference voice) are correct.", "red")
-    except RuntimeError as e:
-        cprint(f"ERROR: A runtime error occurred: {e}", "red")
-    except Exception as e:
-        cprint(f"An unexpected error occurred: {e}", "red")
-        import traceback
-        traceback.print_exc()
+    asyncio.run(main())

@@ -62,4 +62,4 @@ EXPOSE 8765
 ENTRYPOINT ["/app/entrypoint.sh"]
 
 # Default command
-CMD ["poetry", "run", "python", "src/tts_service.py"]
+CMD ["poetry", "run", "python", "src/main.py"]
