@@ -155,7 +155,7 @@ jobs:
       - name: 🧪 Run tts WebSocket Test
         run: |
           echo "Testing tts server"
-          poetry run python test.py
+          python test.py
   
   
   
