@@ -20,7 +20,7 @@ jobs:
 
           # Set fallback defaults
           HOST_DEFAULT="0.0.0.0"
-          PORT_DEFAULT="8000"
+          PORT_DEFAULT="5005"
 
           export HOST="$HOST_DEFAULT"
           export PORT="$PORT_DEFAULT"
