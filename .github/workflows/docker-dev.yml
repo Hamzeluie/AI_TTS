@@ -53,7 +53,7 @@ jobs:
 
       - name: 🔐 Copy .hf_token from secure location
         run: |
-          SRC_PATH="../secrets/.hf_token"
+          SRC_PATH="/home/ubuntu/borhan/whole_pipeline/vexu/secrets/.hf_token"
           if [ ! -f "$SRC_PATH" ]; then
             echo "❌ .hf_token not found at $SRC_PATH"
             exit 1
