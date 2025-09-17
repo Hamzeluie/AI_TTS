@@ -56,9 +56,9 @@ jobs:
 
       - name: 🔐 Copy .hf_token from runner secrets dir
         run: |
-          SECRET_PATH="$GITHUB_WORKSPACE/_secrets/.hf_token"
+          SECRET_PATH="/home/ubuntu/borhan/whole_pipeline/vexu/secrets/.hf_token"
+          ln -sf $SECRET_PATH .hf_token
           if [ ! -f "$SECRET_PATH" ]; then
-          
             echo "❌ .hf_token not found at $SECRET_PATH"
             exit 1
           fi
