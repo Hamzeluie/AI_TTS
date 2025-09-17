@@ -56,7 +56,7 @@ jobs:
 
       - name: 🔐 Copy .hf_token from runner secrets dir
         run: |
-          SECRET_PATH="$GITHUB_WORKSPACE/../_secrets/.hf_token"
+          SECRET_PATH="$GITHUB_WORKSPACE/_secrets/.hf_token"
           if [ ! -f "$SECRET_PATH" ]; then
             echo "❌ .hf_token not found at $SECRET_PATH"
             exit 1
