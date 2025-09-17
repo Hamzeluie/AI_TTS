@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Server configuration - adjust these based on your setup
 SERVER_HOST = os.getenv("HOST", "0.0.0.0")
-SERVER_PORT = int(os.getenv("PORT", 8000))
+SERVER_PORT = int(os.getenv("TEST_PORT", 5005))
 WEBSOCKET_URI = f"ws://{SERVER_HOST}:{SERVER_PORT}"
 
 # Audio configuration for saving received audio

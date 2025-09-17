@@ -20,10 +20,12 @@ jobs:
 
           # Set fallback defaults
           HOST_DEFAULT="0.0.0.0"
-          PORT_DEFAULT="5005"
+          PORT_DEFAULT="8000"
+          TEST_PORT_DEFAULT="5001"
 
           export HOST="$HOST_DEFAULT"
           export PORT="$PORT_DEFAULT"
+          export TEST_PORT="$TEST_PORT_DEFAULT"
 
           # Check if .env exists at that path
           if [ -f "$ENV_FILE" ]; then
@@ -32,7 +34,7 @@ jobs:
             source "$ENV_FILE"
             set +a
           else
-            echo "⚠️ .env not found at $ENV_FILE — using defaults: HOST=$HOST_DEFAULT, PORT=$PORT_DEFAULT"
+            echo "⚠️ .env not found at $ENV_FILE — using defaults: HOST=$HOST_DEFAULT, PORT=$PORT_DEFAULT ,  TEST_PORT=$TEST_PORT_DEFAULT"
           fi
 
           # Validate
