@@ -57,12 +57,11 @@ jobs:
       - name: 🔐 Copy .hf_token from runner secrets dir
         run: |
           SECRET_PATH="/home/ubuntu/borhan/whole_pipeline/vexu/secrets/.hf_token"
-          ln -sf $SECRET_PATH .hf_token
           if [ ! -f "$SECRET_PATH" ]; then
             echo "❌ .hf_token not found at $SECRET_PATH"
             exit 1
           fi
-          cp "$SECRET_PATH" .hf_token
+          ln -sf $SECRET_PATH .hf_token
           chmod 600 .hf_token
           echo "✅ .hf_token copied (length: $(wc -c < .hf_token) bytes)"
         shell: bash
