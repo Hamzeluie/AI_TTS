@@ -38,31 +38,32 @@ jobs:
           fi
 
           # Validate
-          if [ -z "$HOST" ] || [ -z "$PORT" ]; then
-            echo "❌ Error: HOST or PORT is not set (even after fallback)"
+          if [ -z "$HOST" ] || [ -z "$PORT" ] || [ -z "$TEST_PORT" ]; then
+            echo "❌ Error: HOST or PORT or TEST_PORT is not set (even after fallback)"
             exit 1
           fi
 
-          echo "📌 Final config: HOST=$HOST, PORT=$PORT"
+          echo "📌 Final config: HOST=$HOST, PORT=$PORT, TEST_PORT=$TEST_PORT"
 
           # Save to GITHUB_ENV
           echo "HOST=$HOST" >> $GITHUB_ENV
           echo "PORT=$PORT" >> $GITHUB_ENV
+          echo "TEST_PORT=$TEST_PORT" >> $GITHUB_ENV
 
       - name: 🔍 Checkout repository
         uses: actions/checkout@v4
 
 
-      - name: 🔐 Copy .hf_token from secure location
+      - name: 🔐 Copy .hf_token from runner secrets dir
         run: |
-          SRC_PATH="/home/ubuntu/borhan/whole_pipeline/vexu/secrets/.hf_token"
-          if [ ! -f "$SRC_PATH" ]; then
-            echo "❌ .hf_token not found at $SRC_PATH"
+          SECRET_PATH="$GITHUB_WORKSPACE/../_secrets/.hf_token"
+          if [ ! -f "$SECRET_PATH" ]; then
+            echo "❌ .hf_token not found at $SECRET_PATH"
             exit 1
           fi
-          cp "$SRC_PATH" .hf_token
+          cp "$SECRET_PATH" .hf_token
           chmod 600 .hf_token
-          echo "✅ .hf_token copied into workspace (length: $(wc -c < .hf_token) bytes)"
+          echo "✅ .hf_token copied (length: $(wc -c < .hf_token) bytes)"
         shell: bash
 
       - name: 🐳 Set up Docker Buildx
@@ -113,9 +114,7 @@ jobs:
             --gpus all \
             --name tts-server-container \
             --restart unless-stopped \
-            -p "${{ env.PORT }}:${{ env.PORT }}" \
-            -e HOST="${{ env.HOST }}" \
-            -e PORT="${{ env.PORT }}" \
+            -p "${{ env.TEST_PORT }}":8000 \
             tts-server:latest
       
       
