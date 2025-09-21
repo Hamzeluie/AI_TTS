@@ -159,17 +159,3 @@ jobs:
           python test.py
   
   
-  
-  
-  pushing_to_mehdi_origin:
-    runs-on: self-hosted
-    steps:
-      - name: 🔄 Push to Mehdi's Repository
-        run: |
-          # Only push if remote "mehdi" exists
-          if git remote | grep -q '^mehdi$'; then
-            echo "✅ Remote 'mehdi' found — pushing..."
-            git push mehdi develop
-          else
-            echo "⚠️ Remote 'mehdi' not found — skipping push."
-          fi
