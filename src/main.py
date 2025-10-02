@@ -1,14 +1,13 @@
 import asyncio
-import functools  # For functools.partial
 import logging  # For better logging control
 import os
 import queue
 import threading
-from pathlib import Path
 
 import numpy as np
 import torch
 import websockets
+from aiohttp import web
 from fish_engine import (
     FishEngine,  # Assuming FishEngine is the TTS engine you want to use
 )
@@ -39,8 +38,8 @@ logger = logging.getLogger(__name__)
 
 
 # --- Configuration ---
-SERVER_HOST = os.getenv("HOST","0.0.0.0")
-SERVER_PORT = int(os.getenv("PORT",8000))
+SERVER_HOST = os.getenv("HOST", "0.0.0.0")
+SERVER_PORT = int(os.getenv("PORT", 8000))
 
 # Audio configuration
 COQUI_SAMPLE_RATE = 24000  # CoquiEngine outputs at 24kHz
@@ -67,6 +66,7 @@ voice_counter = 0
 
 # Global CoquiEngine instance
 global_coqui_engine = None
+
 
 # Simple, fast audio resampling without buffering delays
 def resample_audio_chunk(
@@ -232,12 +232,13 @@ async def send_buffered_audio_task(
     finally:
         logger.info(f"Buffered audio sender for {client_address} finished.")
 
+
 def print_queue_contents(q):
     """Print the contents of a queue without permanently removing items"""
     if q.empty():
         print("Queue is empty")
         return
-    
+
     items = []
     # Temporarily remove all items
     while not q.empty():
@@ -246,12 +247,13 @@ def print_queue_contents(q):
             items.append(item)
         except queue.Empty:
             break
-    
+
     print(f"Queue contents: {items}")
-    
+
     # Put all items back
     for item in items:
         q.put(item)
+
 
 # --- WebSocket Handler ---
 async def handle_client(websocket):
@@ -281,11 +283,13 @@ async def handle_client(websocket):
                     audio_buffer.extend(resampled_audio)
                 buffer_event.set()
         except Exception as e:
-            logger.error(f"Error processing audio chunk for client {client_address}: {e}")
+            logger.error(
+                f"Error processing audio chunk for client {client_address}: {e}"
+            )
 
     global voice_counter
     voice_counter += 1
-    
+
     # Store play kwargs
     play_kwargs = {
         "on_audio_chunk": on_audio_chunk_callback,
@@ -297,24 +301,25 @@ async def handle_client(websocket):
     # --- TTS Execution Function ---
     async def run_tts():
         nonlocal tts_running, tts_should_restart
-        
+
         while tts_running:
             try:
                 # Create a new stream for each iteration (in case of restart)
-                print('#TTS_RUN' * 20, 'before' * 5)
-                print(f'client_word_queue: {client_word_queue}')
+                print("#TTS_RUN" * 20, "before" * 5)
+                print(f"client_word_queue: {client_word_queue}")
                 stream = TextToAudioStream(
                     engine=global_coqui_engine,
                     muted=True,
                     log_characters=False,
                 )
-                print('RESTART ' * 10)
+                print("RESTART " * 10)
                 # Feed the stream
-                print('#' * 20, 'after' * 5)
-                print(f'client_word_queue: {tts_input_generator(client_word_queue)}')
+                print("#" * 20, "after" * 5)
+                print(f"client_word_queue: {tts_input_generator(client_word_queue)}")
                 stream.feed(tts_input_generator(client_word_queue))
-                print('#' * 20, 'after feed' * 5)
-                print(f'client_word_queue: {tts_input_generator(client_word_queue)}')
+                print("#" * 20, "after feed" * 5)
+                print(f"client_word_queue: {tts_input_generator(client_word_queue)}")
+
                 # Run the play method in executor
                 def play_stream():
                     try:
@@ -322,16 +327,16 @@ async def handle_client(websocket):
                     except Exception as e:
                         if "stop" not in str(e).lower():
                             logger.error(f"TTS play failed: {e}")
-                
+
                 await current_loop.run_in_executor(None, play_stream)
-                
+
                 # If we get here, the play finished normally
                 break
-                
+
             except Exception as e:
                 logger.error(f"TTS execution error: {e}")
                 break
-                
+
             # Check if we need to restart
             if tts_should_restart:
                 tts_should_restart = False
@@ -351,52 +356,66 @@ async def handle_client(websocket):
     # --- Task to receive messages from the client ---
     async def receive_client_messages():
         nonlocal tts_should_restart
-        
+
         try:
-            
+
             async for message in websocket:
-                print(f'TESTI: {print_queue_contents(client_word_queue)}')
-                print("TTS"*20, message)
+                print(f"TESTI: {print_queue_contents(client_word_queue)}")
+                print("TTS" * 20, message)
                 if message == "END_OF_TEXT":
-                    logger.info(f"Received END_OF_TEXT from client {client_address}. Signaling TTS generator to stop.")
+                    logger.info(
+                        f"Received END_OF_TEXT from client {client_address}. Signaling TTS generator to stop."
+                    )
                     client_word_queue.put(None)
                     break
-                
+
                 elif message == "INTERRUPT_TTS":
-                    logger.info(f"Received INTERRUPT_TTS from client {client_address}. Restarting stream.")
+                    logger.info(
+                        f"Received INTERRUPT_TTS from client {client_address}. Restarting stream."
+                    )
                     # stream.char_iter.stop()
                     # Set flag to restart TTS
                     tts_should_restart = True
-                    
+
                     # Signal the current stream to stop
-                    print('#' * 20, 'before' * 5)
-                    print(f'client_word_queue: {print_queue_contents(client_word_queue)}')
+                    print("#" * 20, "before" * 5)
+                    print(
+                        f"client_word_queue: {print_queue_contents(client_word_queue)}"
+                    )
                     client_word_queue.put(None)
-                    
+
                     # Clear the queue
                     while not client_word_queue.empty():
                         try:
                             client_word_queue.get_nowait()
                         except queue.Empty:
                             break
-                    print('#' * 20, 'AFTER' * 5)
-                    print(f'client_word_queue: {print_queue_contents(client_word_queue)}')
+                    print("#" * 20, "AFTER" * 5)
+                    print(
+                        f"client_word_queue: {print_queue_contents(client_word_queue)}"
+                    )
                     # Clear audio buffer
                     with buffer_lock:
                         audio_buffer.clear()
-                    
+
                     logger.info(f"Stream restart initiated for client {client_address}")
                     continue
-                
+
                 logger.info(f"Server received token from {client_address}: '{message}'")
                 client_word_queue.put(message)
-                
+
         except websockets.exceptions.ConnectionClosedOK:
-            logger.info(f"Client {client_address} disconnected gracefully during message reception.")
+            logger.info(
+                f"Client {client_address} disconnected gracefully during message reception."
+            )
         except websockets.exceptions.ConnectionClosedError as e:
-            logger.warning(f"Client {client_address} disconnected with error during message reception: {e}")
+            logger.warning(
+                f"Client {client_address} disconnected with error during message reception: {e}"
+            )
         except Exception as e:
-            logger.exception(f"Error in receive_client_messages for client {client_address}: {e}")
+            logger.exception(
+                f"Error in receive_client_messages for client {client_address}: {e}"
+            )
         finally:
             client_word_queue.put(None)
             logger.info(f"Receive messages task for {client_address} finished.")
@@ -416,8 +435,7 @@ async def handle_client(websocket):
     # --- Wait for tasks to complete and handle cleanup ---
     try:
         done, pending = await asyncio.wait(
-            [receive_messages_task, tts_task], 
-            return_when=asyncio.FIRST_COMPLETED
+            [receive_messages_task, tts_task], return_when=asyncio.FIRST_COMPLETED
         )
 
         # Signal everything to stop
@@ -437,7 +455,9 @@ async def handle_client(websocket):
         # Check for exceptions
         for task in [receive_messages_task, tts_task, send_audio_task]:
             if task.done() and task.exception():
-                logger.error(f"Task {task.get_name()} completed with exception: {task.exception()}")
+                logger.error(
+                    f"Task {task.get_name()} completed with exception: {task.exception()}"
+                )
 
         await websocket.send("END_OF_AUDIO")
         logger.info(f"Sent END_OF_AUDIO signal to client {client_address}.")
@@ -445,12 +465,16 @@ async def handle_client(websocket):
         try:
             ack_message = await asyncio.wait_for(websocket.recv(), timeout=10)
             if ack_message == "ACK_AUDIO_RECEIVED":
-                logger.info(f"Received ACK_AUDIO_RECEIVED from client {client_address}. Handshake complete.")
+                logger.info(
+                    f"Received ACK_AUDIO_RECEIVED from client {client_address}. Handshake complete."
+                )
         except (asyncio.TimeoutError, websockets.exceptions.ConnectionClosed):
             logger.info(f"Client {client_address} connection closed during ACK wait.")
 
     except Exception as e:
-        logger.exception(f"An unexpected error occurred for client {client_address}: {e}")
+        logger.exception(
+            f"An unexpected error occurred for client {client_address}: {e}"
+        )
     finally:
         # Cleanup
         tts_running = False
@@ -467,9 +491,31 @@ async def handle_client(websocket):
                     pass
 
         logger.info(f"Client {client_address} disconnected.")
-        
+
+
+async def health(request):
+    # Simple health check logic
+    if global_coqui_engine is not None:
+        return web.json_response({"status": "healthy"})
+    else:
+        return web.json_response({"status": "unhealthy"}, status=500)
+
+
+async def start_health_server():
+    app = web.Application()
+    app.router.add_get("/health", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, SERVER_HOST, SERVER_PORT + 100)
+    await site.start()
+    print(
+        f"Health check HTTP server running at http://{SERVER_HOST}:{SERVER_PORT+100}/health"
+    )
+
+
 async def main():
     global global_coqui_engine
+    await start_health_server()
 
     # Create a dummy reference voice file if it doesn't exist, for initial testing
     if not os.path.exists(REFERENCE_VOICE_WAV):

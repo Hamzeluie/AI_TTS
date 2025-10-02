@@ -46,7 +46,7 @@ RUN --mount=type=secret,id=hf_token \
     pip install huggingface-hub && \
     huggingface-cli download fishaudio/openaudio-s1-mini \
     --local-dir checkpoints/openaudio-s1-mini \
-    --token $(cat /run/secrets/hf_token)
+    --token ${HF_TOKEN}
 
 # Copy the entrypoint script first and set permissions
 COPY entrypoint.sh /app/entrypoint.sh
