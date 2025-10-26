@@ -26,6 +26,22 @@ files = [
 ]
 
 [[package]]
+name = "agent-architect"
+version = "0.1.0"
+description = "Agent architecture abstractions"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = []
+develop = false
+
+[package.source]
+type = "git"
+url = "https://github.com/Hamzeluie/agent_architect.git"
+reference = "main"
+resolved_reference = "bdcf7b80b42913bc4b9a4072e7f36dd10ddf5be7"
+
+[[package]]
 name = "aiofiles"
 version = "24.1.0"
 description = "File support for asyncio."
@@ -12187,4 +12203,4 @@ cffi = ["cffi (>=1.11)"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10"
-content-hash = "3ee17ef5a836ca1740e1daba0dd30412568f4fc947440c3802829a47a4cd1738"
+content-hash = "4f3db546eff8deb627dd069c8f83a34fc42c4b90b4ca964aad1d049c3c533c53"

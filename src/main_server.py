@@ -1,12 +1,19 @@
 import asyncio
-import json
 import logging
 import os
 import time
 from typing import Any, Dict, List
 
 import redis.asyncio as redis
-from abstract_models import *
+from agent_architect.datatype_abstraction import AudioFeatures, Features, TextFeatures
+from agent_architect.models_abstraction import (
+    AbstractAsyncModelInference,
+    AbstractInferenceServer,
+    AbstractQueueManagerServer,
+    DynamicBatchManager,
+)
+from agent_architect.session_abstraction import AgentSessions, SessionStatus
+from agent_architect.utils import go_next_service
 from fish_engine import FishTextToSpeech
 
 # Configure logging
@@ -41,7 +48,6 @@ class RedisQueueManager(AbstractQueueManagerServer):
         self.redis_client = await redis.from_url(self.redis_url, decode_responses=True)
 
     async def get_status_object(self, req: Features) -> AgentSessions:
-        print("3" * 10, req)
         raw = await self.redis_client.hget(
             f"{req.agent_name}:{self.active_sessions_key}", req.sid
         )
@@ -73,7 +79,6 @@ class RedisQueueManager(AbstractQueueManagerServer):
     ) -> List[AudioFeatures]:
         batch = []
         start_time = time.time()
-
         while len(batch) < max_batch_size:
             elapsed = time.time() - start_time
             if elapsed >= max_wait_time and batch:
@@ -103,7 +108,6 @@ class RedisQueueManager(AbstractQueueManagerServer):
         """Push inference result back to Redis pub/sub"""
         status_obj = await self.get_status_object(result)
         status_obj.refresh_time()
-        print("1" * 10)
         await self.redis_client.hset(
             f"{result.agent_name}:{self.active_sessions_key}",
             result.sid,
@@ -227,26 +231,26 @@ class InferenceService(AbstractInferenceServer):
     async def _process_batches_loop(self):
         logger.info("Starting batch processing loop")
         while self.is_running:
-            # try:
-            batch = await self.queue_manager.get_data_batch(
-                max_batch_size=self.batch_manager.max_batch_size,
-                max_wait_time=self.batch_manager.max_wait_time,
-            )
-            if batch:
-                start_time = time.time()
-                batch_results = await self.inference_engine.process_batch(batch)
-                processing_time = time.time() - start_time
-
-                for request in batch:
-                    result_data = batch_results.get(request.sid, {})
-                    await self.queue_manager.push_result(request)
-
-                self.batch_manager.update_metrics(len(batch), processing_time)
-                logger.info(
-                    f"Processed batch of {len(batch)} requests in {processing_time:.3f}s"
+            try:
+                batch = await self.queue_manager.get_data_batch(
+                    max_batch_size=self.batch_manager.max_batch_size,
+                    max_wait_time=self.batch_manager.max_wait_time,
                 )
-            else:
-                await asyncio.sleep(0.01)
-            # except Exception as e:
-            #     logger.error(f"Error in batch processing loop: {e}")
-            #     await asyncio.sleep(0.1)
+                if batch:
+                    start_time = time.time()
+                    batch_results = await self.inference_engine.process_batch(batch)
+                    processing_time = time.time() - start_time
+
+                    for request in batch:
+                        result_data = batch_results.get(request.sid, {})
+                        await self.queue_manager.push_result(request)
+
+                    self.batch_manager.update_metrics(len(batch), processing_time)
+                    logger.info(
+                        f"Processed batch of {len(batch)} requests in {processing_time:.3f}s"
+                    )
+                else:
+                    await asyncio.sleep(0.01)
+            except Exception as e:
+                logger.error(f"Error in batch processing loop: {e}")
+                await asyncio.sleep(0.1)

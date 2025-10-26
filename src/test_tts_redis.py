@@ -7,7 +7,7 @@ import shutil
 from dataclasses import dataclass
 
 # from mode1 import AsyncModelInference, InferenceService
-from real_time_tts_models import *
+from main_server import *
 
 async def main():
     # === Setup ===
