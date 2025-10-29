@@ -7,7 +7,7 @@ import shutil
 from dataclasses import dataclass
 
 # from mode1 import AsyncModelInference, InferenceService
-from main_server import *
+from main_service import *
 
 async def main():
     # === Setup ===
@@ -41,7 +41,7 @@ async def main():
         max_wait_time=0.1,          # allow 100ms window for batching
     )
     await service.start()
-    print("✅ Service started – running for 10 seconds...")
+    print("✅ Service started running for 10 seconds...")
 
     # Keep the service alive to observe queue behavior
     await asyncio.sleep(10)
