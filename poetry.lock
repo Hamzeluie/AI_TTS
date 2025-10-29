@@ -39,7 +39,7 @@ develop = false
 type = "git"
 url = "https://github.com/Hamzeluie/agent_architect.git"
 reference = "main"
-resolved_reference = "bdcf7b80b42913bc4b9a4072e7f36dd10ddf5be7"
+resolved_reference = "5e9afce6ef047c0702418611331bdf7633b136a2"
 
 [[package]]
 name = "aiofiles"

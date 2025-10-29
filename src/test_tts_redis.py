@@ -13,7 +13,8 @@ async def main():
     # === Setup ===
     config_name = "modded_dac_vq"
     checkpoint_path = "/home/ubuntu/borhan/whole_pipeline/vexu/AI_TTS/checkpoints/openaudio-s1-mini/codec.pth"
-    reference_dir = "/home/ubuntu/borhan/whole_pipeline/vexu/AI_TTS/redis_codes/test/ref"
+    # reference_dir = "/home/ubuntu/borhan/whole_pipeline/vexu/AI_TTS/redis_codes/test/ref"
+    reference_dir = '/home/ubuntu/borhan/whole_pipeline/vexu/AI_TTS/src/test/ref'
 
     if not os.path.exists(reference_dir):
         raise FileNotFoundError(f"Reference dir missing: {reference_dir}")

@@ -16,9 +16,14 @@ from agent_architect.session_abstraction import AgentSessions, SessionStatus
 from agent_architect.utils import go_next_service
 from fish_engine import FishTextToSpeech
 
+import uvicorn
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+from fastapi import FastAPI
+import uvicorn
+from contextlib import asynccontextmanager
 
 
 class RedisQueueManager(AbstractQueueManagerServer):
@@ -49,7 +54,7 @@ class RedisQueueManager(AbstractQueueManagerServer):
 
     async def get_status_object(self, req: Features) -> AgentSessions:
         raw = await self.redis_client.hget(
-            f"{req.agent_name}:{self.active_sessions_key}", req.sid
+            f"{req.agent_type}:{self.active_sessions_key}", req.sid
         )
         if raw is None:
             return None
@@ -63,9 +68,8 @@ class RedisQueueManager(AbstractQueueManagerServer):
         # change status of the session to 'stop' if the session expired
         if status_obj.is_expired():
             status_obj.status = SessionStatus.STOP
-            print("2" * 10)
             await self.redis_client.hset(
-                f"{req.agent_name}:{self.active_sessions_key}",
+                f"{req.agent_type}:{self.active_sessions_key}",
                 req.sid,
                 status_obj.to_json(),
             )
@@ -109,7 +113,7 @@ class RedisQueueManager(AbstractQueueManagerServer):
         status_obj = await self.get_status_object(result)
         status_obj.refresh_time()
         await self.redis_client.hset(
-            f"{result.agent_name}:{self.active_sessions_key}",
+            f"{result.agent_type}:{self.active_sessions_key}",
             result.sid,
             status_obj.to_json(),
         )
@@ -168,10 +172,12 @@ class AsyncModelInference(AbstractAsyncModelInference):
             result.append(
                 AudioFeatures(
                     sid=request.sid,
+                    agent_type=request.agent_type,
                     priority=request.priority,
-                    audio=audio_sr[0],
+                    audio=audio_sr[0].tobytes(),
                     sample_rate=16000,
                     created_at=request.created_at,
+                    is_final=request.is_final,
                 )
             )
         return result
@@ -231,26 +237,92 @@ class InferenceService(AbstractInferenceServer):
     async def _process_batches_loop(self):
         logger.info("Starting batch processing loop")
         while self.is_running:
-            try:
-                batch = await self.queue_manager.get_data_batch(
-                    max_batch_size=self.batch_manager.max_batch_size,
-                    max_wait_time=self.batch_manager.max_wait_time,
+            # try:
+            batch = await self.queue_manager.get_data_batch(
+                max_batch_size=self.batch_manager.max_batch_size,
+                max_wait_time=self.batch_manager.max_wait_time,
+            )
+            if batch:
+                start_time = time.time()
+                batch_results = await self.inference_engine.process_batch(batch)
+                processing_time = time.time() - start_time
+
+                for result in batch_results:
+                    await self.queue_manager.push_result(result)
+
+                self.batch_manager.update_metrics(len(batch), processing_time)
+                logger.info(
+                    f"Processed batch of {len(batch)} requests in {processing_time:.3f}s"
                 )
-                if batch:
-                    start_time = time.time()
-                    batch_results = await self.inference_engine.process_batch(batch)
-                    processing_time = time.time() - start_time
+            else:
+                await asyncio.sleep(0.01)
+            # except Exception as e:
+            #     logger.error(f"Error in batch processing loop: {e}")
+            #     await asyncio.sleep(0.1)
 
-                    for request in batch:
-                        result_data = batch_results.get(request.sid, {})
-                        await self.queue_manager.push_result(request)
+service = None  # Global reference to the service for shutdown
 
-                    self.batch_manager.update_metrics(len(batch), processing_time)
-                    logger.info(
-                        f"Processed batch of {len(batch)} requests in {processing_time:.3f}s"
-                    )
-                else:
-                    await asyncio.sleep(0.01)
-            except Exception as e:
-                logger.error(f"Error in batch processing loop: {e}")
-                await asyncio.sleep(0.1)
+import tempfile
+import torch
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global inference_engine, service
+    logging.info("Application startup: Initializing LLM Manager...")
+    config_name = "modded_dac_vq"
+    checkpoint_path = "/home/ubuntu/borhan/whole_pipeline/vexu/AI_TTS/checkpoints/openaudio-s1-mini/codec.pth"
+    # reference_dir = "/home/ubuntu/borhan/whole_pipeline/vexu/AI_TTS/redis_codes/test/ref"
+    reference_dir = '/home/ubuntu/borhan/whole_pipeline/vexu/AI_TTS/src/test/ref'
+
+    if not os.path.exists(reference_dir):
+        raise FileNotFoundError(f"Reference dir missing: {reference_dir}")
+    if not os.path.isfile(os.path.join(reference_dir, "reference_text.txt")):
+        raise FileNotFoundError("Missing reference_text.txt")
+    if not os.path.isfile(os.path.join(reference_dir, "reference_codec.npy")):
+        raise FileNotFoundError("Missing reference_codec.npy")
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    output_base = tempfile.mkdtemp(prefix="multi_user_batch_test_")
+    print(f"Using temp dir: {output_base}")
+    tts_model = FishTextToSpeech(
+        config_name=config_name,
+        checkpoint_path=checkpoint_path,
+        device=device
+    )
+    service = InferenceService(
+        model=tts_model,
+        output_codec_path_main_dir=output_base,
+        reference_dir=reference_dir,
+        redis_url="redis://localhost:6379",
+        max_batch_size=4,           # ← critical: match your expected batch size
+        max_wait_time=0.1,          # allow 100ms window for batching
+    )
+    await service.start()
+    logging.info("InferenceService started.")
+
+    yield
+    # Shutdown logic
+    if service:
+        service.is_running = False
+        if service.processing_task:
+            service.processing_task.cancel()
+            try:
+                await service.processing_task
+            except asyncio.CancelledError:
+                logging.info("Processing loop cancelled.")
+        logging.info("InferenceService stopped.")
+    logging.info("Application shutdown...")
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.get("/")
+def read_root():
+    return {"status": "LLM RAG server is running."}
+
+
+# --- Main execution ---
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8103)

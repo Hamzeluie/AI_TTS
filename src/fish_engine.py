@@ -79,13 +79,13 @@ class FishTextToSpeech:
         warmup_output_dir = "./test"
         os.makedirs(warmup_output_dir, exist_ok=True)
         # Call generate_semantic_tokens and handle its current return type (tensor)
-        prompt_text = open("./test/ref/reference_text.txt", "r").readlines()[0]
+        prompt_text = open("/home/ubuntu/borhan/whole_pipeline/vexu/AI_TTS/src/test/ref/reference_text.txt", "r").readlines()[0]
         returned_data_tensor = inference_text2semantic(
         decoder_model=self.decoder,
         decode_one_token=self.decode_one_token,
         text=warm_up_text,
         prompt_text=(prompt_text, ),
-        prompt_tokens=("./test/ref/reference_codec.npy", ),
+        prompt_tokens=("/home/ubuntu/borhan/whole_pipeline/vexu/AI_TTS/src/test/ref/reference_codec.npy", ),
         num_samples=1,
         max_new_tokens=1024,
         top_p=0.9,

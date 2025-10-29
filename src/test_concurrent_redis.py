@@ -13,7 +13,7 @@ async def async_synthesize_voice(
     tts_engine: "FishTextToSpeech",
     text: str,
     output_dir: str,
-    reference_dir: str = "./test",
+    reference_dir: str = "/home/ubuntu/borhan/whole_pipeline/vexu/AI_TTS/src/test",
 ) -> tuple:
     """
     Run synthesize_voice in a thread to avoid blocking the async loop.
@@ -54,7 +54,7 @@ async def tts_worker(queue_manager: RedisQueueManager, tts_engine: FishTextToSpe
         for req in batch:
             try:
                 # Create per-request output dir
-                out_dir = f"./outputs/{req.sid}"
+                out_dir = f"./outputs_redis/{req.sid}"
                 os.makedirs(out_dir, exist_ok=True)
 
                 # Run TTS in thread
@@ -62,7 +62,7 @@ async def tts_worker(queue_manager: RedisQueueManager, tts_engine: FishTextToSpe
                     tts_engine=tts_engine,
                     text=req.text,
                     output_dir=out_dir,
-                    reference_dir="/home/mehdi/Documents/projects/tts/fish-speech/test/ref"  # your reference voice dir
+                    reference_dir="/home/ubuntu/borhan/whole_pipeline/vexu/AI_TTS/src/test/ref"  # your reference voice dir
                 )
 
                 # Publish result: send WAV path or base64/audio bytes
@@ -87,11 +87,11 @@ async def tts_worker(queue_manager: RedisQueueManager, tts_engine: FishTextToSpe
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-async def client_task(client_id: int, sentences: List[str], redis_url: str, queue_name: str):
+async def client_task(client_id: int, sentences: List[str], redis_url: str, service_name: str):
     # Each client gets its OWN queue manager (for safe listening)
     req_id = sentences[0]  # Just use first sentence as req_id for simplicity
     sentences = [sentences[1]]  # Remaining are actual sentences
-    queue_manager = RedisQueueManager(redis_url=redis_url, queue_name=queue_name)
+    queue_manager = RedisQueueManager(redis_url=redis_url, service_name=service_name)
     await queue_manager.initialize()
 
     all_results = []
@@ -144,11 +144,11 @@ async def mock_worker(queue_manager: RedisQueueManager):
 
 async def main():
     redis_url = "redis://localhost:6379"
-    queue_name = "inference_queue"
+    service_name = "TTS"
 
     # Initialize TTS engine (synchronous, do once)
     config_name = "modded_dac_vq"
-    checkpoint_path = "checkpoints/openaudio-s1-mini/codec.pth"
+    checkpoint_path = "/home/ubuntu/borhan/whole_pipeline/vexu/AI_TTS/checkpoints/openaudio-s1-mini/codec.pth"
     tts_engine = FishTextToSpeech(
         config_name=config_name,       # ← update
         checkpoint_path=checkpoint_path, # ← update
@@ -157,7 +157,7 @@ async def main():
     tts_engine.load_model()  # This is blocking, but OK at startup
 
     # Redis manager for worker
-    worker_qm = RedisQueueManager(redis_url=redis_url, queue_name=queue_name)
+    worker_qm = RedisQueueManager(redis_url=redis_url, service_name=service_name)
     await worker_qm.initialize()
 
     # Start TTS worker
@@ -169,7 +169,7 @@ async def main():
         ["22*22", "How are you"],
     ]
     client_tasks = [
-        asyncio.create_task(client_task(i, sentences, redis_url, queue_name))
+        asyncio.create_task(client_task(i, sentences, redis_url, service_name))
         for i, sentences in enumerate(clients_sentences)
     ]
     logger.info("Submitting first 2 sentences...")
@@ -177,7 +177,7 @@ async def main():
     # === Step 2: Submit urgent sentence (should jump ahead if priority works) ===
     logger.info("Submitting urgent sentence (first word = priority=1)...")
     urgent_future = asyncio.create_task(
-        client_task(client_id=99, sentences=["33*33", "Urgent message now"], redis_url=redis_url, queue_name=queue_name)
+        client_task(client_id=99, sentences=["33*33", "Urgent message now"], redis_url=redis_url, service_name=service_name)
     )
     all_futures = client_tasks + [urgent_future]
     results = await asyncio.gather(*all_futures)
@@ -189,50 +189,51 @@ async def main():
         logger.info(f"Client {client_id} done: {[w for w, _ in word_results]}")
         
         
-async def main1():
-    redis_url = "redis://localhost:6379"
-    queue_name = "inference_queue"
-
-    # Initialize worker
-    worker_qm = RedisQueueManager(redis_url=redis_url, queue_name=queue_name)
-    await worker_qm.initialize()
-    worker_task = asyncio.create_task(mock_worker(worker_qm))
-
-    # === Step 1: Submit first 2 sentences (early clients) ===
-    early_clients = [
-        ["11*11", "Hello world this is a test of a redis queue"],
-        ["22*22", "How are you doing today in this fine weather"],
-    ]
-    early_futures = []
-    for i, sentences in enumerate(early_clients):
-        task = asyncio.create_task(
-            client_task(client_id=i, sentences=sentences, redis_url=redis_url, queue_name=queue_name)
-        )
-        early_futures.append(task)
-
-    logger.info("Submitting first 2 sentences...")
-    await asyncio.sleep(2.)  # Let them submit their first words
-
-    # === Step 2: Submit urgent sentence (should jump ahead if priority works) ===
-    logger.info("Submitting urgent sentence (first word = priority=1)...")
-    urgent_future = asyncio.create_task(
-        client_task(client_id=99, sentences=["33*33", "Urgent message now"], redis_url=redis_url, queue_name=queue_name)
-    )
-
-    # === Step 3: Wait for all to complete ===
-    all_futures = early_futures + [urgent_future]
-    results = await asyncio.gather(*all_futures)
-
-    # Cleanup
-    worker_task.cancel()
-    try:
-        await worker_task
-    except asyncio.CancelledError:
-        pass
-    await worker_qm.close()
-
-    for client_id, word_results in results:
-        logger.info(f"Client {client_id} completed {len(word_results)} word requests.")
-        
 if __name__ == "__main__":
     asyncio.run(main())
+    
+# async def main1():
+#     redis_url = "redis://localhost:6379"
+#     queue_name = "inference_queue"
+
+#     # Initialize worker
+#     worker_qm = RedisQueueManager(redis_url=redis_url, queue_name=queue_name)
+#     await worker_qm.initialize()
+#     worker_task = asyncio.create_task(mock_worker(worker_qm))
+
+#     # === Step 1: Submit first 2 sentences (early clients) ===
+#     early_clients = [
+#         ["11*11", "Hello world this is a test of a redis queue"],
+#         ["22*22", "How are you doing today in this fine weather"],
+#     ]
+#     early_futures = []
+#     for i, sentences in enumerate(early_clients):
+#         task = asyncio.create_task(
+#             client_task(client_id=i, sentences=sentences, redis_url=redis_url, queue_name=queue_name)
+#         )
+#         early_futures.append(task)
+
+#     logger.info("Submitting first 2 sentences...")
+#     await asyncio.sleep(2.)  # Let them submit their first words
+
+#     # === Step 2: Submit urgent sentence (should jump ahead if priority works) ===
+#     logger.info("Submitting urgent sentence (first word = priority=1)...")
+#     urgent_future = asyncio.create_task(
+#         client_task(client_id=99, sentences=["33*33", "Urgent message now"], redis_url=redis_url, queue_name=queue_name)
+#     )
+
+#     # === Step 3: Wait for all to complete ===
+#     all_futures = early_futures + [urgent_future]
+#     results = await asyncio.gather(*all_futures)
+
+#     # Cleanup
+#     worker_task.cancel()
+#     try:
+#         await worker_task
+#     except asyncio.CancelledError:
+#         pass
+#     await worker_qm.close()
+
+#     for client_id, word_results in results:
+#         logger.info(f"Client {client_id} completed {len(word_results)} word requests.")
+        

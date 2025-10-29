@@ -199,7 +199,7 @@ dependencies = [
     "dac (>=0.4.3,<0.5.0) ; python_version >= \"3.10\" and python_version < \"3.14\"",
     "fish-speech @ git+https://github.com/fishaudio/fish-speech.git ; python_version < \"4.0\"",
     "redis (>=7.0.0,<8.0.0)",
-    "agent-architect @ git+https://github.com/Hamzeluie/agent_architect.git@main"
+    "agent-architect @ git+https://github.com/Hamzeluie/agent_architect.git@main",
 ]
 
 
