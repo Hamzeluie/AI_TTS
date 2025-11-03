@@ -1,239 +1,188 @@
+#!/usr/bin/env python3
+"""
+Test: Send TTS requests word by word for a single session.
+→ Input sentence is split into words.
+→ Each word → one TTS request.
+→ Saves one WAV per word.
+"""
+
 import asyncio
-from pathlib import Path
-import uuid
-import os
-import time
 import logging
-from typing import List
-from main_service import RedisQueueManager  # assuming your class is in a.py
-from fish_engine import FishTextToSpeech  # assuming your TTS engine class is here
+import os
+import sys
+import wave
+from pathlib import Path
 
+import numpy as np
+import redis.asyncio as redis
 
-async def async_synthesize_voice(
-    tts_engine: "FishTextToSpeech",
-    text: str,
-    output_dir: str,
-    reference_dir: str = "/home/ubuntu/borhan/whole_pipeline/vexu/AI_TTS/src/test",
-) -> tuple:
-    """
-    Run synthesize_voice in a thread to avoid blocking the async loop.
-    """
-    loop = asyncio.get_running_loop()
-    # Offload to thread
-    result = await loop.run_in_executor(
-        None,  # uses default ThreadPoolExecutor
-        _synthesize_voice_sync,
-        tts_engine,
-        text,
-        output_dir,
-        reference_dir
-    )
-    return result
+# Add project root
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-def _synthesize_voice_sync(tts_engine, text, output_dir, reference_dir):
-    """Synchronous wrapper"""
-    output_wav = Path(output_dir) / f"{uuid.uuid4()}.wav"
-    audio, sr = tts_engine.synthesize_voice(
-        text=text,
-        output_codec_path_dir=output_dir,
-        reference_dir=reference_dir,
-        output_wav_path=str(output_wav),
-        save_output=True
-    )
-    return str(output_wav)  # return path or audio bytes
+from agent_architect.datatype_abstraction import AudioFeatures, TextFeatures
+from agent_architect.session_abstraction import AgentSessions, SessionStatus
 
-
-async def tts_worker(queue_manager: RedisQueueManager, tts_engine: FishTextToSpeech):
-    logger.info("TTS worker started (real synthesis).")
-    while True:
-        batch = await queue_manager.get_data_batch(max_batch_size=1, max_wait_time=1.0)
-        if not batch:
-            await asyncio.sleep(0.1)
-            continue
-
-        for req in batch:
-            try:
-                # Create per-request output dir
-                out_dir = f"./outputs_redis/{req.sid}"
-                os.makedirs(out_dir, exist_ok=True)
-
-                # Run TTS in thread
-                wav_path = await async_synthesize_voice(
-                    tts_engine=tts_engine,
-                    text=req.text,
-                    output_dir=out_dir,
-                    reference_dir="/home/ubuntu/borhan/whole_pipeline/vexu/AI_TTS/src/test/ref"  # your reference voice dir
-                )
-
-                # Publish result: send WAV path or base64/audio bytes
-                await queue_manager.publish_result(
-                    sid=req.sid,
-                    result={"audio_path": wav_path},
-                    error=None
-                )
-                logger.info(f"✅ TTS completed for '{req.text}' → {wav_path}")
-
-            except Exception as e:
-                logger.exception(f"❌ TTS failed for {req.sid}: {e}")
-                await queue_manager.publish_result(
-                    sid=req.sid,
-                    result=None,
-                    error=str(e)
-                )
-                
-                
-
-# Set up logger
-logging.basicConfig(level=logging.INFO)
+# --------------------------------------------------------------------------- #
+# Logging
+# --------------------------------------------------------------------------- #
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 
-async def client_task(client_id: int, sentences: List[str], redis_url: str, service_name: str):
-    # Each client gets its OWN queue manager (for safe listening)
-    req_id = sentences[0]  # Just use first sentence as req_id for simplicity
-    sentences = [sentences[1]]  # Remaining are actual sentences
-    queue_manager = RedisQueueManager(redis_url=redis_url, service_name=service_name)
-    await queue_manager.initialize()
+# --------------------------------------------------------------------------- #
+# Config
+# --------------------------------------------------------------------------- #
+REDIS_URL = "redis://localhost:6379"
+AGENT_TYPE = "call"
+SERVICE_NAMES = ["VAD", "STT", "RAG", "TTS"]
+CHANNEL_STEPS = {
+    "VAD": ["input"],
+    "STT": ["high", "low"],
+    "RAG": ["high", "low"],
+    "TTS": ["high", "low"],
+}
+OUTPUT_CHANNEL = f"{AGENT_TYPE}:output"
+ACTIVE_SESSIONS_KEY = f"{AGENT_TYPE}:active_sessions"
 
-    all_results = []
-    for sentence in sentences:
-        words = sentence.split()
-        for i, word in enumerate(words):
-            # Submit via this client's manager (or you could use a shared submitter if needed)
+TTS_SAMPLE_RATE = 24000
+SESSION_TIMEOUT = 30000
+OUTPUT_DIR = Path("/home/ubuntu/borhan/whole_pipeline/vexu/AI_TTS/src/outputs")
+OUTPUT_DIR.mkdir(exist_ok=True)
 
-            session_id = await queue_manager.submit_data_request(
-                text=word,
-                sid=req_id,
-                priority= 1 if i == 0 else 2,
+# --------------------------------------------------------------------------- #
+# Input sentence (will be split into words)
+# --------------------------------------------------------------------------- #
+INPUT_SENTENCE = "Hello Harvey how can I assist you today"
+SESSION_ID = "tts_test_0"
+
+# Split into words (preserves order, no punctuation stripping unless desired)
+WORDS = INPUT_SENTENCE.split()  # e.g., ['Hello', 'Harvey', 'how', ...]
+
+
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+async def create_session(redis_client, sid: str):
+    session = AgentSessions(
+        sid=sid,
+        agent_type=AGENT_TYPE,
+        agent_id="TEST_AGENT",
+        service_names=SERVICE_NAMES,
+        channels_steps=CHANNEL_STEPS,
+        owner_id="+1234567890",
+        status=SessionStatus.ACTIVE,
+        timeout=SESSION_TIMEOUT,
+        first_channel="VAD:input",
+        last_channel=OUTPUT_CHANNEL,
+        created_at=None,
+    )
+    await redis_client.hset(ACTIVE_SESSIONS_KEY, sid, session.to_json())
+    logger.info(f"Session created: {sid}")
+
+
+async def publish_tts_request(redis_client, sid: str, word: str, priority: str):
+    req = TextFeatures(
+        sid=sid,
+        agent_type=AGENT_TYPE,
+        text=word,
+        priority=priority,
+        created_at=None,
+        is_final=True,
+    )
+    channel = f"TTS:{priority}"
+    await redis_client.lpush(channel, req.to_json())
+    logger.info(f"Pushed | sid={sid} | pri={priority} | word='{word}'")
+
+
+async def collect_all_audio_from_output(
+    redis_client, expected_count: int, timeout: int = 180
+) -> list:
+    results = []
+    start_time = asyncio.get_event_loop().time()
+    logger.info(f"Waiting for {expected_count} results on {OUTPUT_CHANNEL}...")
+
+    while len(results) < expected_count:
+        elapsed = asyncio.get_event_loop().time() - start_time
+        if elapsed > timeout:
+            logger.warning(
+                f"Timeout after {timeout}s. Got {len(results)}/{expected_count}"
             )
-            logger.info(f"[Client {client_id}] Submitted word '{word}' priority: {1 if i == 0 else 2}")
+            break
 
-            # Wait for result using the SAME manager (so pubsub is isolated)
-            try:
-                result = await queue_manager.listen_for_result(session_id, timeout=30.0)
-                if result.get('error'):
-                    logger.error(f"[Client {client_id}] Error for {session_id}: {result['error']}")
-                else:
-                    logger.info(f"[Client {client_id}] Got result for '{word}'")
-                all_results.append((word, result))
-            except TimeoutError:
-                logger.warning(f"[Client {client_id}] Timeout waiting for result of '{word}'")
-                all_results.append((word, None))
-
-    await queue_manager.close()
-    return client_id, all_results
-
-async def mock_worker(queue_manager: RedisQueueManager):
-    """Mock worker that consumes batches and publishes dummy results."""
-    logger.info("Mock worker started.")
-    while True:
-        batch = await queue_manager.get_data_batch(max_batch_size=8, max_wait_time=0.5)
-        if not batch:
-            await asyncio.sleep(0.1)
+        result = await redis_client.brpop(OUTPUT_CHANNEL, timeout=5)
+        if result is None:
             continue
-        logger.info(f"Worker processing batch of {len(batch)} requests")
-        for req in batch:
-            # Simulate TTS processing (e.g., fake audio = text repeated)
-            fake_audio = f"[AUDIO-DATA-FOR:'{req.text}']"
-            await queue_manager.publish_result(
-                sid=req.sid,
-                result=fake_audio,
-                error=None
-            )
-        # Optional: break after one batch if you only want to test one round
-        # break
 
+        _, data = result
+        try:
+            audio_feat = AudioFeatures.from_json(data)
+            results.append(audio_feat)
+            duration = len(audio_feat.audio) / TTS_SAMPLE_RATE
+            logger.info(f"Received | sid={audio_feat.sid} | {duration:.2f}s")
+        except Exception as e:
+            logger.error(f"Parse error: {e}")
+
+    return results
+
+
+def save_wav(pcm_bytes: bytes, sample_rate: int, output_path: Path):
+    audio_np = np.frombuffer(pcm_bytes, dtype=np.float32)
+    audio_np = np.clip(audio_np, -1.0, 1.0)
+    audio_int16 = (audio_np * 32767).astype(np.int16)
+
+    with wave.open(str(output_path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(audio_int16.tobytes())
+
+    logger.info(f"Saved {output_path.name}")
+
+
+# --------------------------------------------------------------------------- #
+# Main
+# --------------------------------------------------------------------------- #
 async def main():
-    redis_url = "redis://localhost:6379"
-    service_name = "TTS"
+    redis_client = await redis.from_url(REDIS_URL, decode_responses=False)
 
-    # Initialize TTS engine (synchronous, do once)
-    config_name = "modded_dac_vq"
-    checkpoint_path = "/home/ubuntu/borhan/whole_pipeline/vexu/AI_TTS/checkpoints/openaudio-s1-mini/codec.pth"
-    tts_engine = FishTextToSpeech(
-        config_name=config_name,       # ← update
-        checkpoint_path=checkpoint_path, # ← update
-        device="cuda"
+    # 1. Create session
+    await create_session(redis_client, SESSION_ID)
+
+    # 2. Publish one TTS request per word
+    total_words = len(WORDS)
+    logger.info(f"Split input into {total_words} words: {WORDS}")
+
+    publish_tasks = []
+    for idx, word in enumerate(WORDS):
+        priority = "high" if idx % 2 == 0 else "low"
+        publish_tasks.append(
+            publish_tts_request(redis_client, SESSION_ID, word, priority)
+        )
+
+    await asyncio.gather(*publish_tasks)
+    logger.info(f"Published {total_words} word-level TTS requests")
+
+    # 3. Collect all audio responses
+    all_results = await collect_all_audio_from_output(
+        redis_client, total_words, timeout=300
     )
-    tts_engine.load_model()  # This is blocking, but OK at startup
 
-    # Redis manager for worker
-    worker_qm = RedisQueueManager(redis_url=redis_url, service_name=service_name)
-    await worker_qm.initialize()
+    # 4. Save each result as a WAV file
+    for idx, audio_feat in enumerate(all_results):
+        if audio_feat.sid != SESSION_ID:
+            logger.warning(f"Unexpected session: {audio_feat.sid}")
+            continue
+        output_path = OUTPUT_DIR / f"word_{SESSION_ID}_{idx:03d}_{WORDS[idx]}.wav"
+        save_wav(audio_feat.audio, TTS_SAMPLE_RATE, output_path)
 
-    # Start TTS worker
-    worker_task = asyncio.create_task(tts_worker(worker_qm, tts_engine))
+    # 5. Cleanup
+    await redis_client.hdel(ACTIVE_SESSIONS_KEY, SESSION_ID)
+    await redis_client.aclose()
+    logger.info("Test completed.")
 
-    # Start clients (as before)
-    clients_sentences = [
-        ["11*11", "Hello world"],
-        ["22*22", "How are you"],
-    ]
-    client_tasks = [
-        asyncio.create_task(client_task(i, sentences, redis_url, service_name))
-        for i, sentences in enumerate(clients_sentences)
-    ]
-    logger.info("Submitting first 2 sentences...")
-    await asyncio.sleep(2.)  # Let them submit their first words
-    # === Step 2: Submit urgent sentence (should jump ahead if priority works) ===
-    logger.info("Submitting urgent sentence (first word = priority=1)...")
-    urgent_future = asyncio.create_task(
-        client_task(client_id=99, sentences=["33*33", "Urgent message now"], redis_url=redis_url, service_name=service_name)
-    )
-    all_futures = client_tasks + [urgent_future]
-    results = await asyncio.gather(*all_futures)
-    # Cleanup
-    worker_task.cancel()
-    await worker_qm.close()
 
-    for client_id, word_results in results:
-        logger.info(f"Client {client_id} done: {[w for w, _ in word_results]}")
-        
-        
 if __name__ == "__main__":
     asyncio.run(main())
-    
-# async def main1():
-#     redis_url = "redis://localhost:6379"
-#     queue_name = "inference_queue"
-
-#     # Initialize worker
-#     worker_qm = RedisQueueManager(redis_url=redis_url, queue_name=queue_name)
-#     await worker_qm.initialize()
-#     worker_task = asyncio.create_task(mock_worker(worker_qm))
-
-#     # === Step 1: Submit first 2 sentences (early clients) ===
-#     early_clients = [
-#         ["11*11", "Hello world this is a test of a redis queue"],
-#         ["22*22", "How are you doing today in this fine weather"],
-#     ]
-#     early_futures = []
-#     for i, sentences in enumerate(early_clients):
-#         task = asyncio.create_task(
-#             client_task(client_id=i, sentences=sentences, redis_url=redis_url, queue_name=queue_name)
-#         )
-#         early_futures.append(task)
-
-#     logger.info("Submitting first 2 sentences...")
-#     await asyncio.sleep(2.)  # Let them submit their first words
-
-#     # === Step 2: Submit urgent sentence (should jump ahead if priority works) ===
-#     logger.info("Submitting urgent sentence (first word = priority=1)...")
-#     urgent_future = asyncio.create_task(
-#         client_task(client_id=99, sentences=["33*33", "Urgent message now"], redis_url=redis_url, queue_name=queue_name)
-#     )
-
-#     # === Step 3: Wait for all to complete ===
-#     all_futures = early_futures + [urgent_future]
-#     results = await asyncio.gather(*all_futures)
-
-#     # Cleanup
-#     worker_task.cancel()
-#     try:
-#         await worker_task
-#     except asyncio.CancelledError:
-#         pass
-#     await worker_qm.close()
-
-#     for client_id, word_results in results:
-#         logger.info(f"Client {client_id} completed {len(word_results)} word requests.")
-        

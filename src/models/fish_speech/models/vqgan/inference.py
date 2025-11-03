@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 
 import click
@@ -11,14 +12,16 @@ from hydra import compose, initialize
 from hydra.utils import instantiate
 from loguru import logger
 from omegaconf import OmegaConf
-import time
+
 pyrootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
 from models.fish_speech.utils.file import AUDIO_EXTENSIONS
 
-
 # register eval resolver
-OmegaConf.register_new_resolver("eval", eval)
+try:
+    OmegaConf.register_new_resolver("eval", eval)
+except:
+    pass
 
 
 def load_model(config_name, checkpoint_path, device="cuda"):
@@ -69,9 +72,11 @@ def load_model(config_name, checkpoint_path, device="cuda"):
     "-d",
     default="cuda",
 )
-def main(input_path: Path, output_path: Path, config_name, checkpoint_path, device, model):
-    
-    #model = load_model(config_name, checkpoint_path, device=device) #@m15kh comment
+def main(
+    input_path: Path, output_path: Path, config_name, checkpoint_path, device, model
+):
+
+    # model = load_model(config_name, checkpoint_path, device=device) #@m15kh comment
     if input_path.suffix in AUDIO_EXTENSIONS:
         logger.info(f"Processing in-place reconstruction of {input_path}")
 
@@ -96,7 +101,7 @@ def main(input_path: Path, output_path: Path, config_name, checkpoint_path, devi
 
         # Save indices
         np.save(output_path.with_suffix(".npy"), indices.cpu().numpy())
-        
+
     elif input_path.suffix == ".npy":
         logger.info(f"Processing precomputed indices from {input_path}")
         indices = np.load(input_path)
@@ -126,15 +131,14 @@ def main(input_path: Path, output_path: Path, config_name, checkpoint_path, devi
         logger.info(f"Saved audio to {output_path}")
     else:
         logger.info("Output name is 'clone', skipping save.")
-    
+
     # Return the audio generation time
     print(f"duration time is {audio_time}")
     return audio_time
 
 
-
 def infer_tts(npy_tts_voice, device, model):
-     
+
     # indices = np.load(input_path)
     indices = npy_tts_voice
 
@@ -150,7 +154,7 @@ def infer_tts(npy_tts_voice, device, model):
     logger.info(
         f"Generated audio of shape {fake_audios.shape}, equivalent to {audio_duration:.2f} seconds from {indices.shape[1]} features, features/second: {indices.shape[1] / audio_duration:.2f}"
     )
-    
+
     # fake_audio = fake_audios[0, 0].float().detach().cpu().numpy() #NOTE cpu!
     # time_save = time.time()
     # cprint(f'sample rate is {model.spec_transform.sample_rate}' )
@@ -160,7 +164,6 @@ def infer_tts(npy_tts_voice, device, model):
     # logger.info(f"Saved audio to {output_path}")
 
     return fake_audios, audio_duration
-
 
 
 if __name__ == "__main__":

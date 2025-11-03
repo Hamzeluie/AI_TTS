@@ -37,7 +37,7 @@ from RealtimeTTS import TextToAudioStream
 # This needs to be in the main guard to avoid multiprocessing issues
 if __name__ == "__main__":
     # Import FishEngine inside the main guard
-    from fish_engine import FishEngine
+    from vexu.AI_TTS.src.fish_text2speech import FishEngine
 
     # Initialize the engine
     prompt = """topic but I think honestly I didn't there was no thought process to this album for me really it was all just I mean thought process in the sense of I'm going through something and trying to figure out where I'm at and what I'm feeling and what I'm going to do that but like as far as like oh this is a song that I'm going to put on a record like that wasn't it um it was really just a lot of it like before you got here I was listening to with your people and I was like, man, this is like, I was very angry. Yeah. And foundation being hurt. So yeah, so it's really just, yeah, I didn't really think about it. And I do like the idea of taking a quirky pop happy sound melodically and like the sound of the"""
