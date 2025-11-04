@@ -31,10 +31,6 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 
-PUNCTUATION_MARKS = {".", "!", "?", ";", ":", "\n"}
-MAX_BUFFER_WORDS = 1  # or use char limit like MAX_BUFFER_CHARS = 100
-MAX_BUFFER_CHARS = 50
-
 
 class RedisQueueManager(AbstractQueueManagerServer):
     """
@@ -76,7 +72,7 @@ class RedisQueueManager(AbstractQueueManagerServer):
         if status_obj is None:
             return False
         # change status of the session to 'stop' if the session expired
-        print("🤖 SessionStatus.Status", status_obj.status)
+        print("🤖🤖 status_obj.status", status_obj.status)
         if status_obj.is_expired():
             status_obj.status = SessionStatus.STOP
             await self.redis_client.hset(
@@ -86,6 +82,7 @@ class RedisQueueManager(AbstractQueueManagerServer):
             )
             return False
         elif status_obj.status == SessionStatus.INTERRUPT:
+            print("🤖 SessionStatus.INTERRUPT")
             return False
         return True
 
@@ -100,6 +97,7 @@ class RedisQueueManager(AbstractQueueManagerServer):
                 break
 
             for input_channel in self.input_channels:
+                # print("self.input_channels ✅", self.input_channels)
                 result = await self.redis_client.brpop(input_channel, timeout=0.01)
                 if result:
                     break
@@ -155,9 +153,8 @@ class AsyncModelInference:
         # NOTE: we do **not** call super() with thread_pool – we don’t need it
         self.engine = engine
         self._audio_buffers: Dict[str, bytearray] = {}  # sid → collected PCM
-        self._audio_counters: Dict[str, int] = {}  # sid → word count
+        self._active_tasks: Dict[str, asyncio.Task] = {}  # sid → synthesis task
         self.queue_manager: AbstractQueueManagerServer = queue_manager
-        self._buffer_lock = asyncio.Lock()
 
     # --- Warm-up Function ---
     def warm_up_engine(self):
@@ -184,68 +181,42 @@ class AsyncModelInference:
         logger.info("TTS engine warmed up.")
         print("TTS engine warmed up.")
 
-    async def process_single(self, req: TextFeatures) -> List[AudioFeatures]:
+    async def process_batch(self, batch: List[TextFeatures]) -> List[AudioFeatures]:
         """
         Entry point from the batch manager.
         We launch a synthesis task for **each request** and return a list
         of AudioFeatures as soon as they finish.
         """
-        sid = req.sid
+        results: List[AudioFeatures] = []
 
-        # 1. initialise buffer
-        self._audio_buffers[sid] = bytearray()
-        self._audio_counters[sid] = 0
+        for req in batch:
+            sid = req.sid
 
-        # 2. launch async synthesis (fire-and-forget)
-        if await self.queue_manager.is_session_active(req) is False:
-            logger.info(f"❌❌ Session inactive, skipping synthesis for sid={sid}")
-            self._audio_buffers.pop(sid, None)
-            self._audio_counters.pop(sid, None)
-            await asyncio.sleep(1.0)
-            return None
+            # 1. initialise buffer
+            self._audio_buffers[sid] = bytearray()
 
-        task = asyncio.create_task(self._synthesize_one(req))
-        # 3. wait for this request to finish
-        self._audio_buffers[sid] = await task
+            # 2. launch async synthesis (fire-and-forget)
+            task = asyncio.create_task(self._synthesize_one(req))
+            self._active_tasks[sid] = task
 
-        if await self.queue_manager.is_session_active(req) is False:
-            logger.info(f"❌ Session inactive, skipping synthesis for sid={sid}")
-            self._audio_buffers.pop(sid, None)
-            self._audio_counters.pop(sid, None)
-            await asyncio.sleep(1.0)
-            return None
+            # 3. wait for this request to finish
+            audio_bytes = await task
+            self._active_tasks.pop(sid, None)
 
-        if self._audio_counters[sid] >= MAX_BUFFER_WORDS:
             # 4. build final AudioFeatures
+            print("☠️", len(audio_bytes))
             audio_feat = AudioFeatures(
                 sid=sid,
                 agent_type=req.agent_type,
                 priority=req.priority,
-                audio=bytes(self._audio_buffers[sid]),
+                audio=bytes(audio_bytes),
                 sample_rate=16000,  # FishEngine streams 24 kHz
                 created_at=req.created_at,
                 is_final=req.is_final,
             )
-            del self._audio_buffers[sid]
-            del self._audio_counters[sid]
-            return audio_feat
+            results.append(audio_feat)
 
-        if req.is_final:
-            audio_feat = AudioFeatures(
-                sid=sid,
-                agent_type=req.agent_type,
-                priority=req.priority,
-                audio=bytes(self._audio_buffers[sid]),
-                sample_rate=16000,  # FishEngine streams 24 kHz
-                created_at=req.created_at,
-                is_final=req.is_final,
-            )
-
-            del self._audio_buffers[sid]
-            del self._audio_counters[sid]
-            return audio_feat
-
-        return None
+        return results
 
     async def _synthesize_one(self, req: TextFeatures) -> bytearray:
         """
@@ -265,6 +236,11 @@ class AsyncModelInference:
 
         buffer = self._audio_buffers[sid]
 
+        if self.queue_manager.is_session_active(req) is False:
+            logger.info(f"Session inactive, skipping synthesis for sid={sid}")
+            self._audio_buffers.pop(sid, None)
+            return bytearray()
+
         self.engine.send_command("synthesize", {"text": req.text})
         pipe = self.engine.parent_synthesize_pipe
         while True:
@@ -272,11 +248,8 @@ class AsyncModelInference:
                 status, data = pipe.recv()
 
                 if status == "success":
-                    async with self._buffer_lock:
-                        # data is already bytes (float32 PCM)
-                        buffer.extend(data)
-                        if req.text not in PUNCTUATION_MARKS:
-                            self._audio_counters[sid] += 1
+                    # data is already bytes (float32 PCM)
+                    buffer.extend(data)
 
                 elif status == "finished":
                     # synthesis complete
@@ -296,52 +269,137 @@ class AsyncModelInference:
         self._audio_buffers.pop(sid, None)
         return buffer
 
-    async def process_batch(self, batch: List[TextFeatures]) -> List[AudioFeatures]:
+    async def _synthesize_one1(self, req: TextFeatures) -> bytearray:
         """
-        Entry point from the batch manager.
-        We launch a synthesis task for **each request** and return a list
-        of AudioFeatures as soon as they finish.
+        Sends a synthesize command to the FishEngine worker and streams
+        back the PCM chunks until ``finished`` is received.
         """
-        results: List[AudioFeatures] = []
+        sid = req.sid
+        buffer = self._audio_buffers[sid]
+        self.engine.send_command("synthesize", {"text": req.text})
+        pipe = self.engine.parent_synthesize_pipe
+        while True:
+            if pipe.poll(timeout=0.001):
+                status, data = pipe.recv()
+
+                if status == "success":
+                    # data is already bytes (float32 PCM)
+                    buffer.extend(data)
+
+                elif status == "finished":
+                    # synthesis complete
+                    break
+
+                elif status == "error":
+                    raise RuntimeError(f"FishEngine error (sid={sid}): {data}")
+
+                else:
+                    logger.warning(f"Unexpected pipe status: {status}")
+
+            else:
+                # tiny sleep to keep the event loop responsive
+                await asyncio.sleep(0.001)
+
+        # Clean up
+        self._audio_buffers.pop(sid, None)
+        return buffer
+
+    async def process_batch_CC(self, batch: List[TextFeatures]) -> None:
         for req in batch:
             sid = req.sid
-            # 1. initialise buffer
-            self._audio_buffers[sid] = bytearray()
-
-            # 2. launch async synthesis (fire-and-forget)
-            if self.queue_manager.is_session_active(req) is False:
-                logger.info(f"❌ Session inactive, skipping synthesis for sid={sid}")
-                self._audio_buffers.pop(sid, None)
-                break
+            if sid in self._active_tasks:
+                # Optionally cancel previous if interrupt
+                if not await self.queue_manager.is_session_active(req):
+                    self._active_tasks[sid].cancel()
             task = asyncio.create_task(self._synthesize_one(req))
-            # 3. wait for this request to finish
-            # audio_bytes = await task
-            self._audio_buffers[sid] = await task
+            self._active_tasks[sid] = task
+        # Don't await — streaming is async and decoupled
 
-            # condition buffer self._audio_buffers[sid]
-            # if len(self._audio_buffers[sid]) >= BUFFER_SEND_THRESHOLD_BYTES:
+    async def _synthesize_one_CC(self, req: TextFeatures):
+        sid = req.sid
+        buffer = bytearray()
+        # SOURCE_RATE = 24000
+        SOURCE_RATE = 8000
+        TARGET_RATE = 16000
+        # TARGET_RATE = 8000
+        SAMPLE_WIDTH = 2  # 16-bit
+        THRESHOLD_MS = 150
+        THRESHOLD_BYTES = int(TARGET_RATE * SAMPLE_WIDTH * (THRESHOLD_MS / 1000))
+        THRESHOLD_BYTES = (THRESHOLD_BYTES // SAMPLE_WIDTH) * SAMPLE_WIDTH
 
-            if self.queue_manager.is_session_active(req) is False:
-                logger.info(f"❌ Session inactive, skipping synthesis for sid={sid}")
-                self._audio_buffers.pop(sid, None)
-                break
+        # In _synthesize_one, replace your current resampling with:
+        def resample_chunk(audio_bytes):
+            """Identical to a.txt's resample_audio_chunk"""
+            if len(audio_bytes) == 0:
+                return b""
+            # FishEngine outputs int16 PCM
+            audio_int16 = np.frombuffer(audio_bytes, dtype=np.int16)
+            if len(audio_int16) == 0:
+                return b""
+            if SOURCE_RATE % TARGET_RATE == 0:
+                decimated = audio_int16[:: SOURCE_RATE // TARGET_RATE]  # 24k → 8k (÷3)
+                # decimated = audio_int16[::3]  # 24k → 8k (÷3)
+            else:
+                # Fallback interpolation
+                audio_float = audio_int16.astype(np.float32) / 32768.0
+                new_length = int(len(audio_float) * TARGET_RATE / SOURCE_RATE)
+                if new_length == 0:
+                    return b""
+                old_indices = np.linspace(0, len(audio_float) - 1, len(audio_float))
+                new_indices = np.linspace(0, len(audio_float) - 1, new_length)
+                decimated_float = np.interp(new_indices, old_indices, audio_float)
+                decimated = (decimated_float * 32767).astype(np.int16)
+            return decimated.tobytes()
 
-            # Extract a chunk of the threshold size
-            # 4. build final AudioFeatures
-            print("☠️", bytes(self._audio_buffers[sid][:BUFFER_SEND_THRESHOLD_BYTES]))
-            audio_feat = AudioFeatures(
-                sid=sid,
-                agent_type=req.agent_type,
-                priority=req.priority,
-                audio=bytes(self._audio_buffers[sid][:BUFFER_SEND_THRESHOLD_BYTES]),
-                sample_rate=16000,  # FishEngine streams 24 kHz
-                created_at=req.created_at,
-                is_final=req.is_final,
-            )
-            results.append(audio_feat)
-            del self._audio_buffers[sid][:BUFFER_SEND_THRESHOLD_BYTES]
+        # Start synthesis
+        self.engine.send_command("synthesize", {"text": req.text})
+        pipe = self.engine.parent_synthesize_pipe
 
-        return results
+        while True:
+            if pipe.poll(timeout=0.001):
+                status, data = pipe.recv()
+                if status == "success":
+                    resampled = resample_chunk(data)
+                    if not resampled:
+                        continue
+                    buffer.extend(resampled)
+
+                    # Send chunks when buffer reaches threshold
+                    while len(buffer) >= THRESHOLD_BYTES:
+                        chunk = bytes(buffer[:THRESHOLD_BYTES])
+                        del buffer[:THRESHOLD_BYTES]
+                        partial = AudioFeatures(
+                            sid=sid,
+                            agent_type=req.agent_type,
+                            priority=req.priority,
+                            audio=chunk,
+                            sample_rate=TARGET_RATE,
+                            created_at=req.created_at,
+                            is_final=False,
+                        )
+                        await self.queue_manager.push_result(partial)
+
+                elif status == "finished":
+                    # Flush remaining buffer
+                    if buffer:
+                        final = AudioFeatures(
+                            sid=sid,
+                            agent_type=req.agent_type,
+                            priority=req.priority,
+                            audio=bytes(buffer),
+                            sample_rate=TARGET_RATE,
+                            created_at=req.created_at,
+                            is_final=True,
+                        )
+                        await self.queue_manager.push_result(final)
+                        buffer.clear()
+                    break
+
+                elif status == "error":
+                    logger.error(f"FishEngine error (sid={sid}): {data}")
+                    break
+
+            await asyncio.sleep(0.001)
 
 
 class InferenceService(AbstractInferenceServer):
@@ -352,7 +410,7 @@ class InferenceService(AbstractInferenceServer):
         # reference_dir: str,
         # max_worker: int = 4,
         redis_url: str = "redis://localhost:6379",
-        max_batch_size: int = 1,
+        max_batch_size: int = 16,
         max_wait_time: float = 0.1,
     ):
         super().__init__()
@@ -386,33 +444,18 @@ class InferenceService(AbstractInferenceServer):
                 max_wait_time=self.batch_manager.max_wait_time,
             )
             if batch:
-
-                for req in batch:
-                    start_time = time.time()
-                    result = await self.inference_engine.process_single(req)
-                    processing_time = time.time() - start_time
-
-                    if result is not None:
-                        await self.queue_manager.push_result(result)
-                        self.batch_manager.update_metrics(len(batch), processing_time)
-                        logger.info(
-                            f"Processed batch of {len(batch)} requests in {processing_time:.3f}s"
-                        )
-                """
-
                 start_time = time.time()
                 batch_results = await self.inference_engine.process_batch(batch)
                 processing_time = time.time() - start_time
 
                 for result in batch_results:
-                    await self.queue_manager.push_result(result)
+                    if await self.is_session_active(result):
+                        await self.queue_manager.push_result(result)
 
                 self.batch_manager.update_metrics(len(batch), processing_time)
                 logger.info(
                     f"Processed batch of {len(batch)} requests in {processing_time:.3f}s"
                 )
-                """
-
             else:
                 await asyncio.sleep(0.01)
             # except Exception as e:
@@ -511,7 +554,7 @@ async def lifespan(app: FastAPI):
     service = InferenceService(
         model=engine,
         redis_url="redis://localhost:6379",
-        max_batch_size=1,  # small batches are fine – engine is sequential
+        max_batch_size=4,  # small batches are fine – engine is sequential
         max_wait_time=0.05,
     )
     await service.start()
