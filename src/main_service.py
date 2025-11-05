@@ -32,8 +32,8 @@ import uvicorn
 from fastapi import FastAPI
 
 PUNCTUATION_MARKS = {".", "!", "?", ";", ":", "\n"}
-MAX_BUFFER_WORDS = 2  # or use char limit like MAX_BUFFER_CHARS = 100
-MAX_BUFFER_CHARS = 50
+MAX_BUFFER_WORDS = 1  # or use char limit like MAX_BUFFER_CHARS = 100
+MAX_BUFFER_CHARS = 500000000
 
 
 class RedisQueueManager(AbstractQueueManagerServer):

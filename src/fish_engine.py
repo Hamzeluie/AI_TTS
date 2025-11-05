@@ -3,6 +3,7 @@ FishEngine - Fish TTS Engine implementation that inherits from BaseEngine.
 This engine provides real-time text-to-speech synthesis using Fish TTS models.
 """
 
+import gc
 import io
 import logging
 import sys
@@ -416,6 +417,8 @@ class FishEngine(BaseEngine):
                                 )
 
                             logging.debug("Converting tokens to audio...")
+                            gc.collect()
+                            torch.cuda.empty_cache()
                             audio_data, audio_duration = vqgan_infer_tts_from_codes(
                                 npy_tts_voice=tokens_tensor,
                                 device=device,
@@ -475,6 +478,7 @@ class FishEngine(BaseEngine):
                             del audio_data
                             del audio_array
                             torch.cuda.empty_cache()
+                            gc.collect()
 
                         except Exception as e:
                             logging.error(f"Synthesis error: {e}")
@@ -554,6 +558,7 @@ class FishEngine(BaseEngine):
                 del text2semantic_model
             if device == "cuda":
                 torch.cuda.empty_cache()
+                gc.collect()
             # Restore stdout/stderr
             sys.stdout = sys.__stdout__
             sys.stderr = sys.__stderr__
