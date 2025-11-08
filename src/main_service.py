@@ -35,6 +35,8 @@ PUNCTUATION_MARKS = {".", "!", "?", ";", ":", "\n"}
 MAX_BUFFER_WORDS = 1  # or use char limit like MAX_BUFFER_CHARS = 100
 MAX_BUFFER_CHARS = 500000000
 
+STOP_WORD = "bye"
+
 
 class RedisQueueManager(AbstractQueueManagerServer):
     """
@@ -169,7 +171,7 @@ class AsyncModelInference:
         # Use a temporary TextToAudioStream for the warm-up
         # It needs a dummy callback, but we don't care about the output
         dummy_stream = TextToAudioStream(engine=self.engine, muted=True)
-        dummy_text = "Hello. how are you today? i am your personal assistant. how can i assist you tody?"  # Short, simple text
+        dummy_text = "Hello. how are you today?"  # Short, simple text
         dummy_stream.feed(dummy_text)
 
         # Use a simple lambda for on_audio_chunk as we don't care about the output
@@ -377,6 +379,18 @@ class InferenceService(AbstractInferenceServer):
         self.is_running = True
         self.processing_task = asyncio.create_task(self._process_batches_loop())
 
+    async def end_call(self, result: TextFeatures):
+        """Push inference result back to Redis pub/sub"""
+        if STOP_WORD in result.text.lower():
+            print("🛑 Stop word detected. Ending session:", result.sid)
+            status_obj = await self.queue_manager.get_status_object(result)
+            status_obj.status = SessionStatus.STOP
+            await self.queue_manager.redis_client.hset(
+                f"{result.agent_type}:{self.queue_manager.active_sessions_key}",
+                result.sid,
+                status_obj.to_json(),
+            )
+
     async def _process_batches_loop(self):
         logger.info("Starting batch processing loop")
         while self.is_running:
@@ -394,6 +408,8 @@ class InferenceService(AbstractInferenceServer):
 
                     if result is not None:
                         await self.queue_manager.push_result(result)
+                        await self.end_call(req)
+
                         self.batch_manager.update_metrics(len(batch), processing_time)
                         logger.info(
                             f"Processed batch of {len(batch)} requests in {processing_time:.3f}s"
