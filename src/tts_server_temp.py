@@ -8,7 +8,7 @@ import threading
 import numpy as np
 import torch
 import websockets
-from fish_engine import (
+from vexu.AI_TTS.src.fish_text2speech import (
     FishEngine,  # Assuming FishEngine is the TTS engine you want to use
 )
 

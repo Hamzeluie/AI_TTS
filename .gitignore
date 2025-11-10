@@ -13,3 +13,4 @@ outputs
 actions-runner/
 saved_speech_segments/
 local_models/
+redis_codes/*

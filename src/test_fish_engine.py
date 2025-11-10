@@ -1,6 +1,6 @@
 import time
 import torch
-from fish_engine import FishEngine
+from vexu.AI_TTS.src.fish_text2speech import FishEngine
 from RealtimeTTS import TextToAudioStream
 from multiprocessing import freeze_support
 
