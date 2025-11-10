@@ -40,15 +40,16 @@ RUN poetry config virtualenvs.create true && \
     poetry env info
 
 # Download model weights (using build-time secret for HF token)
-ARG HF_TOKEN
+# ARG HF_TOKEN
 RUN mkdir -p checkpoints/openaudio-s1-mini
 RUN --mount=type=secret,id=hf_token \
     pip install huggingface-hub && \
+    HF_TOKEN="$(cat /run/secrets/hf_token | tr -d '[:space:]')" && \
     huggingface-cli download fishaudio/openaudio-s1-mini \
-    --local-dir checkpoints/openaudio-s1-mini \
-    --token $(cat /run/secrets/hf_token)
+        --local-dir checkpoints/openaudio-s1-mini \
+        --token "$HF_TOKEN"
 
-# Copy the entrypoint script first and set permissions
+# Copy the entrypoint script first and set permissionss
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
@@ -62,4 +63,4 @@ EXPOSE 8765
 ENTRYPOINT ["/app/entrypoint.sh"]
 
 # Default command
-CMD ["poetry", "run", "python", "src/tts_service.py"]
+CMD ["poetry", "run", "python", "src/main.py"]

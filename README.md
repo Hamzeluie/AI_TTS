@@ -53,7 +53,15 @@ with:
 
 # Input/Output structure
 input and output of the service in dictionary structure.
+you can access to the service with "ws://{HOST}:{PORT}"
 
 ## Input structure:
+the input in simple text.(you can see input and output structur in test.py)
 
 ## output structure:
+
+        {
+                "type": string,
+                "delta": base64Encoded(utf-8),
+                "item_id": integer,
+        }

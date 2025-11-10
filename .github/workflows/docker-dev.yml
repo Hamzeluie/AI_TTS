@@ -21,9 +21,11 @@ jobs:
           # Set fallback defaults
           HOST_DEFAULT="0.0.0.0"
           PORT_DEFAULT="8000"
+          TEST_PORT_DEFAULT="5001"
 
           export HOST="$HOST_DEFAULT"
           export PORT="$PORT_DEFAULT"
+          export TEST_PORT="$TEST_PORT_DEFAULT"
 
           # Check if .env exists at that path
           if [ -f "$ENV_FILE" ]; then
@@ -32,31 +34,44 @@ jobs:
             source "$ENV_FILE"
             set +a
           else
-            echo "⚠️ .env not found at $ENV_FILE — using defaults: HOST=$HOST_DEFAULT, PORT=$PORT_DEFAULT"
+            echo "⚠️ .env not found at $ENV_FILE — using defaults: HOST=$HOST_DEFAULT, PORT=$PORT_DEFAULT ,  TEST_PORT=$TEST_PORT_DEFAULT"
           fi
 
           # Validate
-          if [ -z "$HOST" ] || [ -z "$PORT" ]; then
-            echo "❌ Error: HOST or PORT is not set (even after fallback)"
+          if [ -z "$HOST" ] || [ -z "$PORT" ] || [ -z "$TEST_PORT" ]; then
+            echo "❌ Error: HOST or PORT or TEST_PORT is not set (even after fallback)"
             exit 1
           fi
 
-          echo "📌 Final config: HOST=$HOST, PORT=$PORT"
+          echo "📌 Final config: HOST=$HOST, PORT=$PORT, TEST_PORT=$TEST_PORT"
 
           # Save to GITHUB_ENV
           echo "HOST=$HOST" >> $GITHUB_ENV
           echo "PORT=$PORT" >> $GITHUB_ENV
+          echo "TEST_PORT=$TEST_PORT" >> $GITHUB_ENV
 
       - name: 🔍 Checkout repository
         uses: actions/checkout@v4
 
+
+      - name: 🔐 Copy .hf_token from runner secrets dir
+        run: |
+          SECRET_PATH="/home/ubuntu/borhan/whole_pipeline/vexu/secrets/.hf_token"
+          if [ ! -f "$SECRET_PATH" ]; then
+            echo "❌ .hf_token not found at $SECRET_PATH"
+            exit 1
+          fi
+          ln -sf $SECRET_PATH .hf_token
+          chmod 600 .hf_token
+          echo "✅ .hf_token copied (length: $(wc -c < .hf_token) bytes)"
+        shell: bash
 
       - name: 🐳 Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Build Docker image
         run: |
-          docker build --no-cache -t tts-server:latest .
+          docker build --no-cache --secret id=hf_token,src=.hf_token -t tts-server .
       
       - name: Stop and remove previous container (optional)
         run: |
@@ -99,9 +114,7 @@ jobs:
             --gpus all \
             --name tts-server-container \
             --restart unless-stopped \
-            -p "${{ env.PORT }}:${{ env.PORT }}" \
-            -e HOST="${{ env.HOST }}" \
-            -e PORT="${{ env.PORT }}" \
+            -p "${{ env.TEST_PORT }}":8000 \
             tts-server:latest
       
       
@@ -143,20 +156,6 @@ jobs:
       - name: 🧪 Run tts WebSocket Test
         run: |
           echo "Testing tts server"
-          poetry run python test.py
+          python test.py
   
   
-  
-  
-  pushing_to_mehdi_origin:
-    runs-on: self-hosted
-    steps:
-      - name: 🔄 Push to Mehdi's Repository
-        run: |
-          # Only push if remote "mehdi" exists
-          if git remote | grep -q '^mehdi$'; then
-            echo "✅ Remote 'mehdi' found — pushing..."
-            git push mehdi develop
-          else
-            echo "⚠️ Remote 'mehdi' not found — skipping push."
-          fi

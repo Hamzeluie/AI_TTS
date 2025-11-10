@@ -5,6 +5,10 @@ description = ""
 authors = [
     {name = "BorhanPetgar",email = "borhangpetgar40@gmail.com"}
 ]
+packages = [
+    { include = "fish_tts_cloning" }
+]
+
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
