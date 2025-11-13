@@ -35,8 +35,8 @@ PUNCTUATION_MARKS = {".", "!", "?", ";", ":", "\n"}
 MAX_BUFFER_WORDS = 1  # or use char limit like MAX_BUFFER_CHARS = 100
 MAX_BUFFER_CHARS = 500000000
 
-STOP_WORD = "bye"
-
+# STOP_WORD = "bye"
+STOP_WORD = "إلى اللقاء"
 
 class RedisQueueManager(AbstractQueueManagerServer):
     """
@@ -381,7 +381,8 @@ class InferenceService(AbstractInferenceServer):
 
     async def end_call(self, result: TextFeatures):
         """Push inference result back to Redis pub/sub"""
-        if STOP_WORD in result.text.lower():
+        if STOP_WORD in result.text.lower() and result.is_final:
+            await asyncio.sleep(1)
             print("🛑 Stop word detected. Ending session:", result.sid)
             status_obj = await self.queue_manager.get_status_object(result)
             status_obj.status = SessionStatus.STOP
