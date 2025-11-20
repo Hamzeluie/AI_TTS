@@ -42,7 +42,7 @@ class TestTTS:
                 while True:
                     try:
                         # Wait up to 0.3 seconds for next message
-                        message = await asyncio.wait_for(ws.recv(), timeout=0.3)
+                        message = await asyncio.wait_for(ws.recv(), timeout=10.0)
                         if isinstance(message, bytes):
                             logger.info(f"Received audio chunk: {len(message)} bytes")
                             self.audio_chunks.append(message)

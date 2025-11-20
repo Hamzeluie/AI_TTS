@@ -2,11 +2,17 @@ import asyncio
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any, Dict, List
 
 import numpy as np
 import redis.asyncio as redis
+import torchaudio
 import uvicorn
+from fish_engine import FishEngine
+from RealtimeTTS import TextToAudioStream
+from scipy.signal import resample_poly
+
 from agent_architect.datatype_abstraction import AudioFeatures, Features, TextFeatures
 from agent_architect.models_abstraction import (
     AbstractAsyncModelInference,
@@ -16,16 +22,13 @@ from agent_architect.models_abstraction import (
 )
 from agent_architect.session_abstraction import AgentSessions, SessionStatus
 from agent_architect.utils import go_next_service
-from fish_engine import FishEngine
-from RealtimeTTS import TextToAudioStream
-from scipy.signal import resample_poly
 
 # from fish_text2speech import FishTextToSpeech
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
+import wave
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -34,8 +37,36 @@ from fastapi import FastAPI
 PUNCTUATION_MARKS = {".", "!", "?", ";", ":", "\n"}
 MAX_BUFFER_WORDS = 1  # or use char limit like MAX_BUFFER_CHARS = 100
 MAX_BUFFER_CHARS = 500000000
+# Audio configuration
+COQUI_SAMPLE_RATE = 24000  # CoquiEngine outputs at 24kHz
+TARGET_SAMPLE_RATE = 8000
+TARGET_SAMPLE_WIDTH_BYTES = 2  # 16-bit PCM
+
+# Manual buffer configuration for increased fluency
+BUFFER_SEND_THRESHOLD_MS = (
+    150  # Send audio when buffer accumulates this many milliseconds (e.g., 150-200ms)
+)
+# Calculate buffer size in bytes, ensuring it's a multiple of the sample width
+BUFFER_SEND_THRESHOLD_BYTES = int(
+    TARGET_SAMPLE_RATE * TARGET_SAMPLE_WIDTH_BYTES * (BUFFER_SEND_THRESHOLD_MS / 1000.0)
+)
+BUFFER_SEND_THRESHOLD_BYTES = (
+    BUFFER_SEND_THRESHOLD_BYTES // TARGET_SAMPLE_WIDTH_BYTES
+) * TARGET_SAMPLE_WIDTH_BYTES
 
 STOP_WORD = "bye"
+
+
+def save_wav(pcm_bytes: bytes, sample_rate: int, output_path: Path):
+    audio_np = np.frombuffer(pcm_bytes, dtype=np.float32)
+    audio_np = np.clip(audio_np, -1.0, 1.0)
+    audio_int16 = (audio_np * 32767).astype(np.int16)
+    with wave.open(str(output_path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(audio_int16.tobytes())
+    logger.info(f"Saved {output_path}")
 
 
 class RedisQueueManager(AbstractQueueManagerServer):
@@ -126,6 +157,19 @@ class RedisQueueManager(AbstractQueueManagerServer):
         if not await self.is_session_active(result):
             logger.info(f"Not pushing result for inactive session: {result.sid}")
             return
+
+        """
+        # Save audio file before processing
+        print("💾 Saving audio file for session:", result.sid)
+        # Save audio to directory (minimal version)
+        audio_dir = Path("/home/ubuntu/borhan/whole_pipeline/vexu/AI_TTS/outputs/temp")
+        audio_dir.mkdir(exist_ok=True)
+        file_count = len(list(audio_dir.glob("audio_*.wav"))) + 1
+        filename = f"audio_{file_count:06d}.wav"
+        save_wav(result.audio, 24000, str(audio_dir / filename))
+        logger.info(f"Audio saved as {filename}")
+        print("💾 Saved audio file for session:", result.sid)
+        """
 
         status_obj = await self.get_status_object(result)
 
@@ -304,6 +348,7 @@ class AsyncModelInference:
         We launch a synthesis task for **each request** and return a list
         of AudioFeatures as soon as they finish.
         """
+
         results: List[AudioFeatures] = []
         for req in batch:
             sid = req.sid
@@ -414,20 +459,19 @@ class InferenceService(AbstractInferenceServer):
                         logger.info(
                             f"Processed batch of {len(batch)} requests in {processing_time:.3f}s"
                         )
-                """
 
-                start_time = time.time()
-                batch_results = await self.inference_engine.process_batch(batch)
-                processing_time = time.time() - start_time
+                # start_time = time.time()
+                # batch_results = await self.inference_engine.process_batch(batch)
+                # processing_time = time.time() - start_time
 
-                for result in batch_results:
-                    await self.queue_manager.push_result(result)
+                # for result in batch_results:
+                #     await self.queue_manager.push_result(result)
+                #     # await self.end_call(req)
 
-                self.batch_manager.update_metrics(len(batch), processing_time)
-                logger.info(
-                    f"Processed batch of {len(batch)} requests in {processing_time:.3f}s"
-                )
-                """
+                # self.batch_manager.update_metrics(len(batch), processing_time)
+                # logger.info(
+                #     f"Processed batch of {len(batch)} requests in {processing_time:.3f}s"
+                # )
 
             else:
                 await asyncio.sleep(0.01)
@@ -508,7 +552,7 @@ async def lifespan(app: FastAPI):
     # ------------------------------------------------------------------
     # 2. Build the engine
     # ------------------------------------------------------------------
-    parent_path = "./"
+    parent_path = "/home/ubuntu/borhan/whole_pipeline/vexu/AI_TTS"
     prompt = """topic but I think honestly I didn't there was no thought process to this album for me really it was all just I mean thought process in the sense of I'm going through something and trying to figure out where I'm at and what I'm feeling and what I'm going to do that but like as far as like oh this is a song that I'm going to put on a record like that wasn't it um it was really just a lot of it like before you got here I was listening to with your people and I was like, man, this is like, I was very angry. Yeah. And foundation being hurt. So yeah, so it's really just, yeah, I didn't really think about it. And I do like the idea of taking a quirky pop happy sound melodically and like the sound of the"""
     engine = FishEngine(
         checkpoint_dir=os.path.join(parent_path, "checkpoints", "openaudio-s1-mini"),

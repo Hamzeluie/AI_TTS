@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import websockets
 from aiohttp import web
-from vexu.AI_TTS.src.fish_text2speech import FishEngine
+from fish_engine import FishEngine
 
 # Configure for headless server environment
 # These might not be strictly necessary for a server that only generates audio,
