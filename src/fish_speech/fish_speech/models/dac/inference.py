@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 
 pyrootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
-from fish_speech.utils.file import AUDIO_EXTENSIONS
+from fish_speech.fish_speech.utils.file import AUDIO_EXTENSIONS
 
 # register eval resolver
 if not OmegaConf.has_resolver("eval"):

@@ -35,7 +35,8 @@ from models.fish_speech.models.vqgan.inference import (
     infer_tts as vqgan_infer_tts_from_codes,
 )
 from models.fish_speech.models.vqgan.inference import main as vqgan_infer_main
-from RealtimeTTS import BaseEngine, SafePipe
+from RealtimeTTS import BaseEngine
+from RealtimeTTS.engines.safepipe import SafePipe
 
 
 class QueueWriter(io.TextIOBase):

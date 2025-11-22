@@ -13,7 +13,11 @@ from fish_engine import FishEngine
 from RealtimeTTS import TextToAudioStream
 from scipy.signal import resample_poly
 
-from agent_architect.datatype_abstraction import AudioFeatures, Features, TextFeatures
+from agent_architect.datatype_abstraction import (
+    Features,
+    TextAudioFeatures,
+    TextFeatures,
+)
 from agent_architect.models_abstraction import (
     AbstractAsyncModelInference,
     AbstractInferenceServer,
@@ -124,7 +128,7 @@ class RedisQueueManager(AbstractQueueManagerServer):
 
     async def get_data_batch(
         self, max_batch_size: int = 8, max_wait_time: float = 0.1
-    ) -> List[AudioFeatures]:
+    ) -> List[TextAudioFeatures]:
         batch = []
         start_time = time.time()
         while len(batch) < max_batch_size:
@@ -152,7 +156,7 @@ class RedisQueueManager(AbstractQueueManagerServer):
 
         return batch
 
-    async def push_result(self, result: AudioFeatures):
+    async def push_result(self, result: TextAudioFeatures):
         """Push inference result back to Redis pub/sub"""
         if not await self.is_session_active(result):
             logger.info(f"Not pushing result for inactive session: {result.sid}")
@@ -186,6 +190,7 @@ class RedisQueueManager(AbstractQueueManagerServer):
             channels_steps=status_obj.channels_steps,
             last_channel=status_obj.last_channel,
             prioriry=result.priority,
+            sid=result.sid,
         )
         await self.redis_client.lpush(next_service, result.to_json())
         logger.info(f"Result pushed for request {result.sid}, to {next_service}")
@@ -230,11 +235,11 @@ class AsyncModelInference:
         logger.info("TTS engine warmed up.")
         print("TTS engine warmed up.")
 
-    async def process_single(self, req: TextFeatures) -> List[AudioFeatures]:
+    async def process_single(self, req: TextFeatures) -> List[TextAudioFeatures]:
         """
         Entry point from the batch manager.
         We launch a synthesis task for **each request** and return a list
-        of AudioFeatures as soon as they finish.
+        of TextAudioFeatures as soon as they finish.
         """
         sid = req.sid
 
@@ -262,12 +267,13 @@ class AsyncModelInference:
             return None
 
         if self._audio_counters[sid] >= MAX_BUFFER_WORDS:
-            # 4. build final AudioFeatures
-            audio_feat = AudioFeatures(
+            # 4. build final TextAudioFeatures
+            audio_feat = TextAudioFeatures(
                 sid=sid,
                 agent_type=req.agent_type,
                 priority=req.priority,
                 audio=bytes(self._audio_buffers[sid]),
+                text=req.text,
                 sample_rate=16000,  # FishEngine streams 24 kHz
                 created_at=req.created_at,
                 is_final=req.is_final,
@@ -277,11 +283,12 @@ class AsyncModelInference:
             return audio_feat
 
         if req.is_final:
-            audio_feat = AudioFeatures(
+            audio_feat = TextAudioFeatures(
                 sid=sid,
                 agent_type=req.agent_type,
                 priority=req.priority,
                 audio=bytes(self._audio_buffers[sid]),
+                text=req.text,
                 sample_rate=16000,  # FishEngine streams 24 kHz
                 created_at=req.created_at,
                 is_final=req.is_final,
@@ -342,14 +349,14 @@ class AsyncModelInference:
         self._audio_buffers.pop(sid, None)
         return buffer
 
-    async def process_batch(self, batch: List[TextFeatures]) -> List[AudioFeatures]:
+    async def process_batch(self, batch: List[TextFeatures]) -> List[TextAudioFeatures]:
         """
         Entry point from the batch manager.
         We launch a synthesis task for **each request** and return a list
-        of AudioFeatures as soon as they finish.
+        of TextAudioFeatures as soon as they finish.
         """
 
-        results: List[AudioFeatures] = []
+        results: List[TextAudioFeatures] = []
         for req in batch:
             sid = req.sid
             # 1. initialise buffer
@@ -376,11 +383,12 @@ class AsyncModelInference:
             # Extract a chunk of the threshold size
             # 4. build final AudioFeatures
             print("☠️", bytes(self._audio_buffers[sid][:BUFFER_SEND_THRESHOLD_BYTES]))
-            audio_feat = AudioFeatures(
+            audio_feat = TextAudioFeatures(
                 sid=sid,
                 agent_type=req.agent_type,
                 priority=req.priority,
                 audio=bytes(self._audio_buffers[sid][:BUFFER_SEND_THRESHOLD_BYTES]),
+                text=req.text,
                 sample_rate=16000,  # FishEngine streams 24 kHz
                 created_at=req.created_at,
                 is_final=req.is_final,

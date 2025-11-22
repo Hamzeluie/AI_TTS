@@ -1,6 +1,5 @@
+from fish_speech.fish_speech.utils import logger as log
 from lightning.pytorch.utilities import rank_zero_only
-
-from fish_speech.utils import logger as log
 
 
 @rank_zero_only
