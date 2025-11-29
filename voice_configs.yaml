@@ -1,0 +1,37 @@
+egyption:
+  language: egyption
+  actor_name: "yasmine sebri"
+  file_path: /home/ubuntu/borhan/whole_pipeline/vexu/voice_clones/yasmin_sebri.npy
+  text: "أنا مامتي كانت بتلعب سباحة كانت بطلة كبيرة جدا فخلوني أخش ألعب سباحة فلما ألعب سباحة من وانا عندي أربع سنين لغاية تمانْتاشر سنة كل يوم بصحة أربعة الصبح عشان خمسة الصبح أكون في المية فبقيت عندي شخصية تركيبة معينة واخد بالك فطفولتي ما كانتش أن أنا في الجنينة وبلعب بالحاجات وفي رفاهية الوقت أو رفاهية إنك ما عملتش ده النهاردة خلاص بكرة إن شاء الله لا كان فيه شدة وكان فيه التزام علي كان لازم بالذات في الرياضة كان لازم أكون شطرة"
+
+iraqi:
+  language: iraqi
+  actor_name: "mina alsheikhi"
+  file_path: /home/ubuntu/borhan/whole_pipeline/vexu/voice_clones/mina_alsheikhi.npy
+  text: "بالعراق احنا بالمدارس مالتنا كانت مدارس مالتنا حكومية  وكلش احنا يعني كنا نظاميين  المريول الأزرق الفيونكل ذا القراسة التوكل يعني  اللي تحطها براسك غير لون المديرة تطيع حظك يعني ماكو  فاحنا كلنا نظامي وستوتات ومدري شنو هذي"
+
+
+jordanian:
+  language: jordanian
+  actor_name: "mina algheikhi"
+  file_path: /home/ubuntu/borhan/whole_pipeline/vexu/voice_clones/mina_algheikhi.npy
+  text: "استغلوني وساعدت ناس مثلا ما واقفوا بعدين او ما اقدروا الجميل او كذا وانا مع اني ما انتظرت مقابل بس انت بتحس بالاخير انك برضو منتظر مقابل مرات  انو بتعمل شي منيح بتكون بتوقع على الاقل appreciation اذا ما هذا  انا مثلا اليوم حتى هاي ما عندي هدا  يعني حتى هاي انتهت يعني ما بعمل اي شي بهدف  الا ذاتي شخصي  اشتركوا في القناة "
+
+
+saudi_arabia:
+  language: saudi_arabia
+  actor_name: "aseel omran"
+  file_path: /home/ubuntu/borhan/whole_pipeline/vexu/voice_clones/aseel_omran.npy
+  text: " ماما من الناس اللي تدعمني بكل خطوة في حياتي  عشان كذا ما عندي جانب النقص اللي بحس فيه للأسف  اللي بحسوا فيه البعض وبسبب أهاليهم  أنه أنتي ناقصة لأنك لسه ما تزوجتي  أكيد أمي زيها زي أي أم ثانية  تتمنى تشوفني مستقرة في يوم والأيام في علاقة  ولكن لما يكون الوقت مناسب  الاختيار صحيح  مش لي مجرد أنه أنا ألبس فستان أبيض وتشوفني عروسة  ولما نحب نكتشف أنه احنا حبينا شخص في حياتنا  ما كنا نتخيل نحب سلبية في شخصيته مثلاً"
+
+urdu:
+  language: urdu
+  actor_name: "urdu_lady"
+  file_path: /home/ubuntu/borhan/whole_pipeline/vexu/voice_clones/urdu_lady.npy
+  text: "तो अब मुझे और भी बहुत कुछ नजर आता है मुहब्बत के सिवा  दिखते हैं वो जुल्म, वो दरावने जादू जिसमें सदियों से इंसानों को तड़पाया गया है  वो लाशों के धेर जो खून में नहाई हुए हर गली हर नुकड पे बिच्चे हुए हैं नजर आते हैं मुझे  जिसम निकले हुए अमराज के तन्नूरों से"
+
+lebanese:
+  language: lebanese
+  actor_name: "nancy ajram"
+  file_path: /home/ubuntu/borhan/whole_pipeline/vexu/voice_clones/nancy_ajram.npy
+  text: "ما هي أشياء أنك لا تستطيع أن تسألني أنت رومانتيك، لست رومانتيك فقط أنا رومانتيك، ولكن أنا أيضاً حميوية، وأيضاً لدي أوقات أنرجية"

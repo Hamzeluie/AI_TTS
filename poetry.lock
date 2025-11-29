@@ -26,7 +26,7 @@ develop = false
 type = "git"
 url = "https://github.com/Hamzeluie/agent_architect.git"
 reference = "HEAD"
-resolved_reference = "6e3f58f5f3d0d361fd7bb6b688d80c65320d4745"
+resolved_reference = "8d0417591728b31d6c6d5bc5e0f1461c64693fad"
 
 [[package]]
 name = "aiofiles"

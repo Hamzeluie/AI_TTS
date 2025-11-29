@@ -9,10 +9,6 @@ import numpy as np
 import redis.asyncio as redis
 import torchaudio
 import uvicorn
-from fish_engine import FishEngine
-from RealtimeTTS import TextToAudioStream
-from scipy.signal import resample_poly
-
 from agent_architect.datatype_abstraction import (
     Features,
     TextAudioFeatures,
@@ -26,6 +22,9 @@ from agent_architect.models_abstraction import (
 )
 from agent_architect.session_abstraction import AgentSessions, SessionStatus
 from agent_architect.utils import go_next_service
+from fish_engine import FishEngine
+from RealtimeTTS import TextToAudioStream
+from scipy.signal import resample_poly
 
 # from fish_text2speech import FishTextToSpeech
 
@@ -317,7 +316,7 @@ class AsyncModelInference:
             return bytearray()
 
         buffer = self._audio_buffers[sid]
-
+        # pass voice clone path and text to engine.
         self.engine.send_command("synthesize", {"text": req.text})
         pipe = self.engine.parent_synthesize_pipe
         while True:
@@ -562,6 +561,9 @@ async def lifespan(app: FastAPI):
     # ------------------------------------------------------------------
     parent_path = "/home/ubuntu/borhan/whole_pipeline/vexu/AI_TTS"
     prompt = """topic but I think honestly I didn't there was no thought process to this album for me really it was all just I mean thought process in the sense of I'm going through something and trying to figure out where I'm at and what I'm feeling and what I'm going to do that but like as far as like oh this is a song that I'm going to put on a record like that wasn't it um it was really just a lot of it like before you got here I was listening to with your people and I was like, man, this is like, I was very angry. Yeah. And foundation being hurt. So yeah, so it's really just, yeah, I didn't really think about it. And I do like the idea of taking a quirky pop happy sound melodically and like the sound of the"""
+    # prompt = """ماما من الناس اللي تدعمني بكل خطوة في حياتي  عشان كذا ما عندي جانب النقص اللي بحس فيه للأسف  اللي بحسوا فيه البعض وبسبب أهاليهم  أنه أنتي ناقصة لأنك لسه ما تزوجتي  أكيد أمي زيها زي أي أم ثانية  تتمنى تشوفني مستقرة في يوم والأيام في علاقة  ولكن لما يكون الوقت مناسب  الاختيار صحيح  مش لي مجرد أنه أنا ألبس فستان أبيض وتشوفني عروسة  ولما نحب نكتشف أنه احنا حبينا شخص في حياتنا  ما كنا نتخيل نحب سلبية في شخصيته مثلاً"""
+    # prompt = """أنا مامتي كانت بتلعب سباحة كانت بطلة كبيرة جدا فخلوني أخش ألعب سباحة فلما ألعب سباحة من وانا عندي أربع سنين لغاية تمانْتاشر سنة كل يوم بصحة أربعة الصبح عشان خمسة الصبح أكون في المية فبقيت عندي شخصية تركيبة معينة واخد بالك فطفولتي ما كانتش أن أنا في الجنينة وبلعب بالحاجات وفي رفاهية الوقت أو رفاهية إنك ما عملتش ده النهاردة خلاص بكرة إن شاء الله لا كان فيه شدة وكان فيه التزام علي كان لازم بالذات في الرياضة كان لازم أكون شطرة"""
+
     engine = FishEngine(
         checkpoint_dir=os.path.join(parent_path, "checkpoints", "openaudio-s1-mini"),
         output_dir=os.path.join(parent_path, "outputs"),
